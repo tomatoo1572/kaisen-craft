@@ -9,24 +9,29 @@ var mouse_sensitivity: float = 0.12
 var cam: Camera3D
 var pitch: float = 0.0
 
-# Stage 1 ground clamp (heightmap-only). Later replaced by voxel collision.
-var ground_epsilon: float = 0.05
-var on_ground: bool = false
+# Voxel collision sampling
+var body_radius: float = 0.35
+var step_height: float = 1.0
+
+# Ground snapping (no teleport)
+var ground_epsilon: float = 0.06
+var snap_up_max: float = 0.65
+var snap_down_max: float = 1.25
+
+# Block interaction
+var reach_distance: float = 6.0
+
+var _vel_y: float = 0.0
 
 func _init() -> void:
-	# Collision shape (not used for terrain yet, but we keep it for later stages)
-	var col := CollisionShape3D.new()
-	var capsule := CapsuleShape3D.new()
-	capsule.radius = 0.35
+	var col: CollisionShape3D = CollisionShape3D.new()
+	var capsule: CapsuleShape3D = CapsuleShape3D.new()
+	capsule.radius = body_radius
 	capsule.height = 1.2
 	col.shape = capsule
-
-	# Move capsule up so the CharacterBody origin is at the feet
-	# Total capsule height ~= height + 2*radius = 1.9 -> half is ~0.95
 	col.position = Vector3(0, 0.95, 0)
 	add_child(col)
 
-	# Camera
 	cam = Camera3D.new()
 	cam.position = Vector3(0, 1.6, 0)
 	add_child(cam)
@@ -40,22 +45,34 @@ func apply_settings(gameplay_cfg: Dictionary) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed():
-		if event.keycode == KEY_ESCAPE:
+		var ek: InputEventKey = event as InputEventKey
+		if ek.keycode == KEY_ESCAPE:
 			if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
-				Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+				Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE as Input.MouseMode)
 			else:
-				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED as Input.MouseMode)
 
 	if event is InputEventMouseMotion and Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
-		rotate_y(-event.relative.x * mouse_sensitivity * 0.01)
-		pitch = clamp(pitch - event.relative.y * mouse_sensitivity * 0.01, deg_to_rad(-89), deg_to_rad(89))
+		var mm: InputEventMouseMotion = event as InputEventMouseMotion
+		rotate_y(-mm.relative.x * mouse_sensitivity * 0.01)
+		pitch = clamp(pitch - mm.relative.y * mouse_sensitivity * 0.01, deg_to_rad(-89), deg_to_rad(89))
 		cam.rotation.x = pitch
 
+	if event is InputEventMouseButton and event.pressed and not event.is_echo():
+		var mb: InputEventMouseButton = event as InputEventMouseButton
+		if mb.button_index == MouseButton.MOUSE_BUTTON_LEFT:
+			_try_break_block()
+
 func _physics_process(dt: float) -> void:
+	var srv: KZ_LocalWorldServer = _get_server()
+
+	var pos: Vector3 = global_position
+	var prev_pos: Vector3 = pos
+
 	# Horizontal input
-	var input_dir := Vector3.ZERO
-	var forward := -global_transform.basis.z
-	var right := global_transform.basis.x
+	var input_dir: Vector3 = Vector3.ZERO
+	var forward: Vector3 = -global_transform.basis.z
+	var right: Vector3 = global_transform.basis.x
 
 	if Input.is_action_pressed("move_forward"):
 		input_dir += forward
@@ -66,59 +83,209 @@ func _physics_process(dt: float) -> void:
 	if Input.is_action_pressed("move_left"):
 		input_dir -= right
 
-	input_dir.y = 0
+	input_dir.y = 0.0
 	input_dir = input_dir.normalized()
 
-	velocity.x = input_dir.x * walk_speed
-	velocity.z = input_dir.z * walk_speed
+	var move_h: Vector3 = input_dir * walk_speed * dt
 
-	# Stage 1: heightmap ground
-	var ground_y: float = _get_ground_y()
+	# Gravity
+	_vel_y -= gravity * dt
 
-	# If we don't have a server yet, just apply gravity normally
-	if ground_y > -1e19:
-		# Determine grounded state before applying gravity
-		on_ground = (global_position.y <= ground_y + ground_epsilon) and (velocity.y <= 0.0)
+	# Snap to ground ONLY if close
+	if srv != null:
+		var wx: int = int(floor(pos.x))
+		var wz: int = int(floor(pos.z))
+		var surface_y: float = float(srv.get_surface_y(wx, wz))
 
-		if on_ground:
-			# Stick to ground
-			global_position.y = ground_y
-			velocity.y = 0.0
+		var dy: float = surface_y - pos.y
+		var close_enough: bool = (dy >= -snap_down_max and dy <= snap_up_max)
+
+		if close_enough and _vel_y <= 0.0 and pos.y <= surface_y + ground_epsilon:
+			pos.y = surface_y
+			_vel_y = 0.0
 			if Input.is_action_just_pressed("jump"):
-				velocity.y = jump_velocity
-				on_ground = false
+				_vel_y = jump_velocity
+
+	# Apply vertical
+	pos.y += _vel_y * dt
+
+	# Horizontal movement with voxel collision + step
+	if srv != null:
+		pos = _move_with_voxel_collision(srv, pos, move_h)
+		pos = _resolve_penetration_safe(srv, prev_pos, pos)
+
+	global_position = pos
+
+func _move_with_voxel_collision(srv: KZ_LocalWorldServer, pos: Vector3, move_h: Vector3) -> Vector3:
+	# X axis
+	if move_h.x != 0.0:
+		var try_pos: Vector3 = Vector3(pos.x + move_h.x, pos.y, pos.z)
+		if not _collides_at(srv, try_pos):
+			pos = try_pos
 		else:
-			velocity.y -= gravity * dt
-	else:
-		velocity.y -= gravity * dt
+			var step_pos: Vector3 = Vector3(try_pos.x, pos.y + step_height, try_pos.z)
+			if not _collides_at(srv, step_pos):
+				pos = step_pos
 
-	move_and_slide()
+	# Z axis
+	if move_h.z != 0.0:
+		var try_pos2: Vector3 = Vector3(pos.x, pos.y, pos.z + move_h.z)
+		if not _collides_at(srv, try_pos2):
+			pos = try_pos2
+		else:
+			var step_pos2: Vector3 = Vector3(try_pos2.x, pos.y + step_height, try_pos2.z)
+			if not _collides_at(srv, step_pos2):
+				pos = step_pos2
 
-	# Clamp after movement too (prevents sinking/falling through)
-	if ground_y > -1e19:
-		if global_position.y < ground_y:
-			global_position.y = ground_y
-			if velocity.y < 0.0:
-				velocity.y = 0.0
-			on_ground = true
+	# Gentle stick-down if close
+	var wx: int = int(floor(pos.x))
+	var wz: int = int(floor(pos.z))
+	var surface_y: float = float(srv.get_surface_y(wx, wz))
+	var dy: float = surface_y - pos.y
+	if dy >= -snap_down_max and dy <= snap_up_max and _vel_y <= 0.0:
+		if pos.y <= surface_y + ground_epsilon:
+			pos.y = surface_y
+			_vel_y = 0.0
 
-func _get_ground_y() -> float:
-	# Pull server from autoload /root/Game without referencing "Game" symbol (safe even if not autoloaded)
-	var game_node := get_node_or_null("/root/Game")
+	return pos
+
+func _resolve_penetration_safe(srv: KZ_LocalWorldServer, prev_pos: Vector3, pos: Vector3) -> Vector3:
+	if not _collides_at(srv, pos):
+		return pos
+
+	# Undo horizontal first
+	var undo_h: Vector3 = Vector3(prev_pos.x, pos.y, prev_pos.z)
+	if not _collides_at(srv, undo_h):
+		return undo_h
+
+	# Undo all
+	if not _collides_at(srv, prev_pos):
+		_vel_y = minf(_vel_y, 0.0)
+		return prev_pos
+
+	# Typed candidates so p2 can be inferred as Vector3
+	var candidates: Array[Vector3] = [
+		Vector3( 0.10,  0.00,  0.00),
+		Vector3(-0.10,  0.00,  0.00),
+		Vector3( 0.00,  0.00,  0.10),
+		Vector3( 0.00,  0.00, -0.10),
+		Vector3( 0.00, -0.10,  0.00),
+		Vector3( 0.00, -0.20,  0.00),
+		Vector3( 0.00,  0.10,  0.00) # last resort
+	]
+
+	for c: Vector3 in candidates:
+		var p2: Vector3 = pos + c
+		if not _collides_at(srv, p2):
+			if _vel_y < 0.0:
+				_vel_y = 0.0
+			return p2
+
+	return prev_pos
+
+func _collides_at(srv: KZ_LocalWorldServer, pos: Vector3) -> bool:
+	var offsets: Array[Vector2] = [
+		Vector2(+body_radius, +body_radius),
+		Vector2(+body_radius, -body_radius),
+		Vector2(-body_radius, +body_radius),
+		Vector2(-body_radius, -body_radius),
+		Vector2(0.0, 0.0)
+	]
+
+	var y_samples: Array[float] = [0.1, 0.9, 1.7]
+
+	for oy: float in y_samples:
+		var wy: int = int(floor(pos.y + oy))
+		for o: Vector2 in offsets:
+			var wx: int = int(floor(pos.x + o.x))
+			var wz: int = int(floor(pos.z + o.y))
+			if srv.get_block_at_world(wx, wy, wz) != 0:
+				return true
+	return false
+
+func _get_server() -> KZ_LocalWorldServer:
+	var game_node: Node = get_node_or_null("/root/Game")
 	if game_node == null:
-		return -1e20
-
+		return null
 	var srv_v: Variant = game_node.get("server")
-	if srv_v == null:
-		return -1e20
-	if not (srv_v is KZ_LocalWorldServer):
-		return -1e20
+	if srv_v is KZ_LocalWorldServer:
+		return srv_v as KZ_LocalWorldServer
+	return null
 
-	var srv: KZ_LocalWorldServer = srv_v as KZ_LocalWorldServer
+func _try_break_block() -> void:
+	var srv: KZ_LocalWorldServer = _get_server()
+	if srv == null:
+		return
 
-	var wx: int = int(floor(global_position.x))
-	var wz: int = int(floor(global_position.z))
-	var h: int = srv.get_height_at_world(wx, wz)
+	var hit: Dictionary = _voxel_raycast(reach_distance)
+	if not bool(hit.get("hit", false)):
+		return
 
-	# Highest solid block is y=h, its top face is y=h+1
-	return float(h + 1)
+	var b: Vector3i = hit["block"] as Vector3i
+	srv.break_block_world(b.x, b.y, b.z)
+
+func _voxel_raycast(max_dist: float) -> Dictionary:
+	var srv: KZ_LocalWorldServer = _get_server()
+	if srv == null:
+		return {"hit": false}
+
+	var origin: Vector3 = cam.global_position
+	var dir: Vector3 = (-cam.global_transform.basis.z).normalized()
+
+	var x: int = int(floor(origin.x))
+	var y: int = int(floor(origin.y))
+	var z: int = int(floor(origin.z))
+
+	var step_x: int = 1 if dir.x > 0.0 else (-1 if dir.x < 0.0 else 0)
+	var step_y: int = 1 if dir.y > 0.0 else (-1 if dir.y < 0.0 else 0)
+	var step_z: int = 1 if dir.z > 0.0 else (-1 if dir.z < 0.0 else 0)
+
+	var t_max_x: float = INF
+	var t_max_y: float = INF
+	var t_max_z: float = INF
+	var t_delta_x: float = INF
+	var t_delta_y: float = INF
+	var t_delta_z: float = INF
+
+	if step_x != 0:
+		var next_x: float = float(x + (1 if step_x > 0 else 0))
+		t_max_x = (next_x - origin.x) / dir.x
+		t_delta_x = 1.0 / abs(dir.x)
+
+	if step_y != 0:
+		var next_y: float = float(y + (1 if step_y > 0 else 0))
+		t_max_y = (next_y - origin.y) / dir.y
+		t_delta_y = 1.0 / abs(dir.y)
+
+	if step_z != 0:
+		var next_z: float = float(z + (1 if step_z > 0 else 0))
+		t_max_z = (next_z - origin.z) / dir.z
+		t_delta_z = 1.0 / abs(dir.z)
+
+	var traveled: float = 0.0
+	var last_step_normal: Vector3i = Vector3i.ZERO
+
+	if srv.get_block_at_world(x, y, z) != 0:
+		return {"hit": true, "block": Vector3i(x, y, z), "normal": Vector3i.ZERO}
+
+	while traveled <= max_dist:
+		if t_max_x < t_max_y and t_max_x < t_max_z:
+			x += step_x
+			traveled = t_max_x
+			t_max_x += t_delta_x
+			last_step_normal = Vector3i(-step_x, 0, 0)
+		elif t_max_y < t_max_z:
+			y += step_y
+			traveled = t_max_y
+			t_max_y += t_delta_y
+			last_step_normal = Vector3i(0, -step_y, 0)
+		else:
+			z += step_z
+			traveled = t_max_z
+			t_max_z += t_delta_z
+			last_step_normal = Vector3i(0, 0, -step_z)
+
+		if srv.get_block_at_world(x, y, z) != 0:
+			return {"hit": true, "block": Vector3i(x, y, z), "normal": last_step_normal}
+
+	return {"hit": false}

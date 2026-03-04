@@ -15,14 +15,16 @@ var _requested: Dictionary = {} # Vector2i -> bool
 # Retry cooldown for failed chunk requests
 var _retry_after_ms: Dictionary = {} # Vector2i -> int
 
-# Streaming tuning (Stage 1)
+# Streaming tuning
 var request_budget_per_frame: int = 16
 var initial_burst_target_loaded: int = 80
 var initial_burst_budget_per_frame: int = 80
 
 # Debug
 var debug_wireframe: bool = false
-var debug_double_sided: bool = true   # START TRUE so you can confirm the “holes” are culling
+
+# Shared material (double-sided so “holes” don’t appear from angle)
+var _mat: StandardMaterial3D
 
 func setup(p_server: KZ_LocalWorldServer, p_worldgen_cfg: Dictionary) -> void:
 	server = p_server
@@ -38,8 +40,15 @@ func setup(p_server: KZ_LocalWorldServer, p_worldgen_cfg: Dictionary) -> void:
 	)
 	view_distance = int(wg.get("view_distance_chunks", 6))
 
+	_mat = StandardMaterial3D.new()
+	_mat.vertex_color_use_as_albedo = true
+	_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
 	RenderingServer.set_debug_generate_wireframes(true)
-	_apply_materials_to_loaded_chunks()
+
+	if not server.chunk_mesh_updated.is_connected(Callable(self, "_on_server_chunk_mesh_updated")):
+		server.chunk_mesh_updated.connect(Callable(self, "_on_server_chunk_mesh_updated"))
 
 func set_player(p: Node3D) -> void:
 	player = p
@@ -48,7 +57,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed() and not event.is_echo():
 		if event.keycode == KEY_F3:
 			debug_wireframe = not debug_wireframe
-			get_viewport().debug_draw = Viewport.DEBUG_DRAW_WIREFRAME if debug_wireframe else Viewport.DEBUG_DRAW_DISABLED
+			if debug_wireframe:
+				get_viewport().debug_draw = Viewport.DEBUG_DRAW_WIREFRAME as Viewport.DebugDraw
+			else:
+				get_viewport().debug_draw = Viewport.DEBUG_DRAW_DISABLED as Viewport.DebugDraw
 
 func _process(_dt: float) -> void:
 	if player == null or server == null:
@@ -113,9 +125,9 @@ func _process(_dt: float) -> void:
 			ch.queue_free()
 
 func _on_chunk_ready(result: Dictionary) -> void:
-	# Always clear requested if we can
 	var cpos: Vector2i = Vector2i.ZERO
 	var has_pos: bool = false
+
 	var cpos_v: Variant = result.get("chunk_pos")
 	if typeof(cpos_v) == TYPE_VECTOR2I:
 		cpos = cpos_v as Vector2i
@@ -129,7 +141,6 @@ func _on_chunk_ready(result: Dictionary) -> void:
 
 	if not has_pos:
 		return
-
 	if _chunks.has(cpos):
 		return
 
@@ -149,8 +160,15 @@ func _on_chunk_ready(result: Dictionary) -> void:
 	add_child(ch)
 	_chunks[cpos] = ch
 
-	var mesh: ArrayMesh = _make_mesh(arrays)
-	ch.set_mesh(mesh)
+	ch.set_mesh(_make_mesh(arrays))
+
+func _on_server_chunk_mesh_updated(chunk_pos: Vector2i, mesh_arrays: Dictionary) -> void:
+	if not _chunks.has(chunk_pos):
+		return
+	var ch: KZ_Chunk = _chunks[chunk_pos] as KZ_Chunk
+	if ch == null:
+		return
+	ch.set_mesh(_make_mesh(mesh_arrays))
 
 func _make_mesh(arrays: Dictionary) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
@@ -164,37 +182,8 @@ func _make_mesh(arrays: Dictionary) -> ArrayMesh:
 	a[Mesh.ARRAY_INDEX] = arrays["indices"]
 
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
-
-	var mat := _create_material()
-	mesh.surface_set_material(0, mat)
-
+	mesh.surface_set_material(0, _mat)
 	return mesh
-
-func _create_material() -> StandardMaterial3D:
-	var mat := StandardMaterial3D.new()
-	mat.vertex_color_use_as_albedo = true
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-
-	# This is the key: double-sided vs backface-culling
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED if debug_double_sided else BaseMaterial3D.CULL_BACK
-	return mat
-
-func _apply_materials_to_loaded_chunks() -> void:
-	var mat := _create_material()
-	var keys: Array = _chunks.keys()
-	for i in range(keys.size()):
-		var c_v: Variant = keys[i]
-		if typeof(c_v) != TYPE_VECTOR2I:
-			continue
-		var c: Vector2i = c_v as Vector2i
-		var ch: KZ_Chunk = _chunks[c] as KZ_Chunk
-		if ch == null or ch.mesh_instance == null:
-			continue
-		var m: Mesh = ch.mesh_instance.mesh
-		if m is ArrayMesh:
-			var am: ArrayMesh = m as ArrayMesh
-			if am.get_surface_count() > 0:
-				am.surface_set_material(0, mat)
 
 func _world_to_chunk(pos: Vector3) -> Vector2i:
 	var cx: int = int(floor(pos.x / float(dims.x)))

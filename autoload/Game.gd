@@ -39,7 +39,7 @@ func _ready() -> void:
 	call_deferred("_spawn_client")
 
 func _spawn_client() -> void:
-	var scene := get_tree().current_scene
+	var scene: Node = get_tree().current_scene
 	if scene == null:
 		scene = get_tree().root
 	if scene == null:
@@ -53,13 +53,28 @@ func _spawn_client() -> void:
 	player = KZ_Player.new()
 	scene.add_child(player)
 
-	var spawn_pos := server.get_spawn_position()
+	var spawn_pos: Vector3 = server.get_spawn_position()
 	player.global_position = spawn_pos
 	player.apply_settings(config_manager.gameplay)
 
 	world_manager.set_player(player)
 
-	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
+	if not server.block_broken.is_connected(Callable(self, "_on_block_broken")):
+		server.block_broken.connect(Callable(self, "_on_block_broken"))
+
+	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED as Input.MouseMode)
+
+func _on_block_broken(world_block: Vector3i, runtime_id: int) -> void:
+	var def: KZ_BlockRegistry.BlockDef = block_registry.get_def_by_runtime(runtime_id)
+	var drop := KZ_DroppedItem.new()
+
+	var scene: Node = get_tree().current_scene
+	if scene == null:
+		scene = get_tree().root
+	scene.add_child(drop)
+
+	drop.global_position = Vector3(float(world_block.x) + 0.5, float(world_block.y) + 0.6, float(world_block.z) + 0.5)
+	drop.setup(def.tint)
 
 func _parse_cmdline_args() -> void:
 	var args := OS.get_cmdline_args()
@@ -70,14 +85,17 @@ func _parse_cmdline_args() -> void:
 			world_name = a.get_slice("=", 1).strip_edges()
 
 func _ensure_input_map() -> void:
-	_add_action_if_missing("move_forward", [KEY_W])
-	_add_action_if_missing("move_back", [KEY_S])
-	_add_action_if_missing("move_left", [KEY_A])
-	_add_action_if_missing("move_right", [KEY_D])
-	_add_action_if_missing("jump", [KEY_SPACE])
-	_add_action_if_missing("ui_cancel", [KEY_ESCAPE])
+	_add_key_action_if_missing("move_forward", [KEY_W])
+	_add_key_action_if_missing("move_back", [KEY_S])
+	_add_key_action_if_missing("move_left", [KEY_A])
+	_add_key_action_if_missing("move_right", [KEY_D])
+	_add_key_action_if_missing("jump", [KEY_SPACE])
+	_add_key_action_if_missing("ui_cancel", [KEY_ESCAPE])
 
-func _add_action_if_missing(action: StringName, keys: Array) -> void:
+	# ✅ Use enum member name that exists on your build
+	_add_mouse_action_if_missing("attack", MouseButton.MOUSE_BUTTON_LEFT)
+
+func _add_key_action_if_missing(action: StringName, keys: Array) -> void:
 	if InputMap.has_action(action):
 		return
 	InputMap.add_action(action)
@@ -85,3 +103,11 @@ func _add_action_if_missing(action: StringName, keys: Array) -> void:
 		var ev := InputEventKey.new()
 		ev.keycode = k
 		InputMap.action_add_event(action, ev)
+
+func _add_mouse_action_if_missing(action: StringName, button: MouseButton) -> void:
+	if InputMap.has_action(action):
+		return
+	InputMap.add_action(action)
+	var ev := InputEventMouseButton.new()
+	ev.button_index = button
+	InputMap.action_add_event(action, ev)
