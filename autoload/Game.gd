@@ -13,6 +13,7 @@ var server: KZ_LocalWorldServer
 
 var world_manager: KZ_WorldManager
 var player: KZ_Player
+var hud: KZ_Hud
 
 func _enter_tree() -> void:
 	_parse_cmdline_args()
@@ -59,22 +60,28 @@ func _spawn_client() -> void:
 
 	world_manager.set_player(player)
 
+	# Stage 3: HUD (hotbar + inventory UI)
+	hud = KZ_Hud.new()
+	scene.add_child(hud)
+	hud.setup(player, block_registry)
+
 	if not server.block_broken.is_connected(Callable(self, "_on_block_broken")):
 		server.block_broken.connect(Callable(self, "_on_block_broken"))
 
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED as Input.MouseMode)
 
 func _on_block_broken(world_block: Vector3i, runtime_id: int) -> void:
+	var sid: String = block_registry.get_string_id(runtime_id)
 	var def: KZ_BlockRegistry.BlockDef = block_registry.get_def_by_runtime(runtime_id)
-	var drop := KZ_DroppedItem.new()
 
+	var drop := KZ_DroppedItem.new()
 	var scene: Node = get_tree().current_scene
 	if scene == null:
 		scene = get_tree().root
 	scene.add_child(drop)
 
 	drop.global_position = Vector3(float(world_block.x) + 0.5, float(world_block.y) + 0.6, float(world_block.z) + 0.5)
-	drop.setup(def.tint)
+	drop.setup(sid, 1, def.tint)
 
 func _parse_cmdline_args() -> void:
 	var args := OS.get_cmdline_args()
@@ -91,9 +98,10 @@ func _ensure_input_map() -> void:
 	_add_key_action_if_missing("move_right", [KEY_D])
 	_add_key_action_if_missing("jump", [KEY_SPACE])
 	_add_key_action_if_missing("ui_cancel", [KEY_ESCAPE])
+	_add_key_action_if_missing("inventory", [KEY_E])
 
-	# ✅ Use enum member name that exists on your build
 	_add_mouse_action_if_missing("attack", MouseButton.MOUSE_BUTTON_LEFT)
+	_add_mouse_action_if_missing("use", MouseButton.MOUSE_BUTTON_RIGHT)
 
 func _add_key_action_if_missing(action: StringName, keys: Array) -> void:
 	if InputMap.has_action(action):

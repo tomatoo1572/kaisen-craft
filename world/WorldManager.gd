@@ -9,21 +9,15 @@ var view_distance: int = 6
 
 var player: Node3D
 
-var _chunks: Dictionary = {}    # Vector2i -> KZ_Chunk
-var _requested: Dictionary = {} # Vector2i -> bool
+var _chunks: Dictionary = {}
+var _requested: Dictionary = {}
+var _retry_after_ms: Dictionary = {}
 
-# Retry cooldown for failed chunk requests
-var _retry_after_ms: Dictionary = {} # Vector2i -> int
-
-# Streaming tuning
 var request_budget_per_frame: int = 16
 var initial_burst_target_loaded: int = 80
 var initial_burst_budget_per_frame: int = 80
 
-# Debug
 var debug_wireframe: bool = false
-
-# Shared material (double-sided so “holes” don’t appear from angle)
 var _mat: StandardMaterial3D
 
 func setup(p_server: KZ_LocalWorldServer, p_worldgen_cfg: Dictionary) -> void:
@@ -41,13 +35,34 @@ func setup(p_server: KZ_LocalWorldServer, p_worldgen_cfg: Dictionary) -> void:
 	view_distance = int(wg.get("view_distance_chunks", 6))
 
 	_mat = StandardMaterial3D.new()
-	_mat.vertex_color_use_as_albedo = true
 	_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_mat.albedo_color = Color(1, 1, 1, 1)
+	_mat.vertex_color_use_as_albedo = false
+
+	# ✅ Godot 4.6: texture_repeat is a bool (no TEXTURE_REPEAT_* constants)
+	_mat.texture_repeat = true
+
+	# ✅ Fix blur/shimmer:
+	# - Best general choice for voxel pixel-ish textures
+	_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC as BaseMaterial3D.TextureFilter
+	# If you want max crisp (more shimmer when moving), use:
+	# _mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
+
+	# Apply grass texture if defined
+	if server != null and server.registry != null:
+		var rid: int = server.registry.get_runtime_id("kaizencraft:grass")
+		var def: KZ_BlockRegistry.BlockDef = server.registry.get_def_by_runtime(rid)
+		if def != null:
+			var p: String = def.texture_all_path
+			if p != "" and ResourceLoader.exists(p):
+				var tex: Texture2D = load(p) as Texture2D
+				if tex != null:
+					_mat.albedo_texture = tex
 
 	RenderingServer.set_debug_generate_wireframes(true)
 
-	if not server.chunk_mesh_updated.is_connected(Callable(self, "_on_server_chunk_mesh_updated")):
+	if server != null and not server.chunk_mesh_updated.is_connected(Callable(self, "_on_server_chunk_mesh_updated")):
 		server.chunk_mesh_updated.connect(Callable(self, "_on_server_chunk_mesh_updated"))
 
 func set_player(p: Node3D) -> void:
@@ -69,7 +84,6 @@ func _process(_dt: float) -> void:
 	var pc: Vector2i = _world_to_chunk(player.global_position)
 	var needed: Dictionary = _compute_needed(pc, view_distance)
 
-	# Request missing (near-first)
 	var to_request: Array[Vector2i] = []
 	var now_ms: int = Time.get_ticks_msec()
 
@@ -107,7 +121,6 @@ func _process(_dt: float) -> void:
 		server.request_chunk(c, Callable(self, "_on_chunk_ready"))
 		count += 1
 
-	# Unload far
 	var to_unload: Array[Vector2i] = []
 	var chunk_keys: Array = _chunks.keys()
 	for i in range(chunk_keys.size()):
@@ -174,13 +187,11 @@ func _make_mesh(arrays: Dictionary) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
 	var a := []
 	a.resize(Mesh.ARRAY_MAX)
-
 	a[Mesh.ARRAY_VERTEX] = arrays["vertices"]
 	a[Mesh.ARRAY_NORMAL] = arrays["normals"]
 	a[Mesh.ARRAY_TEX_UV] = arrays["uvs"]
 	a[Mesh.ARRAY_COLOR] = arrays["colors"]
 	a[Mesh.ARRAY_INDEX] = arrays["indices"]
-
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
 	mesh.surface_set_material(0, _mat)
 	return mesh

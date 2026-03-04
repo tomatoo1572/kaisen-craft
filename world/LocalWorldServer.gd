@@ -3,6 +3,7 @@ class_name KZ_LocalWorldServer
 
 signal chunk_mesh_updated(chunk_pos: Vector2i, mesh_arrays: Dictionary)
 signal block_broken(world_block: Vector3i, runtime_id: int)
+signal block_placed(world_block: Vector3i, runtime_id: int)
 
 var world_root: String = ""
 var world_seed: int = 1337
@@ -20,7 +21,10 @@ var terrain_height_scale: int = 28
 var registry: KZ_BlockRegistry
 var grass_runtime_id: int = 1
 
-# Cache: Vector2i -> Dictionary {chunk_pos, origin, dims, voxels, mesh_arrays}
+# Main-thread noise (performance)
+var _main_noise: FastNoiseLite
+
+# Cache: Vector2i -> Dictionary {chunk_pos, origin, dims, voxels, mesh_arrays, heightmap}
 var _cache: Dictionary = {}
 var _cache_order: Array[Vector2i] = []
 
@@ -36,12 +40,16 @@ var _gen_jobs: Dictionary = {}      # Vector2i -> Thread
 var _pending_mesh: Array[Vector2i] = []
 var _mesh_jobs: Dictionary = {}     # Vector2i -> Thread
 
+# If edits happen while a mesh job is running, mark dirty and rebuild again
+var _mesh_dirty: Dictionary = {}    # Vector2i -> bool
+
 func setup(p_world_root: String, worldgen_cfg: Dictionary, block_registry: KZ_BlockRegistry) -> void:
 	world_root = p_world_root
 	registry = block_registry
 
 	_apply_worldgen(worldgen_cfg)
 	_load_or_create_world_files()
+	_rebuild_main_noise()
 
 	grass_runtime_id = registry.get_runtime_id("kaizencraft:grass")
 
@@ -72,9 +80,8 @@ func _join_all_threads() -> void:
 	_mesh_jobs.clear()
 
 func _process(_dt: float) -> void:
-	# Prioritize mesh jobs (fast visual feedback on breaking)
+	# Prioritize mesh jobs (fast visual feedback on edits)
 	_start_jobs()
-
 	_collect_finished_gen()
 	_collect_finished_mesh()
 
@@ -147,7 +154,7 @@ func _collect_finished_mesh() -> void:
 			_on_mesh_built(pos, result_v)
 
 # ----------------------------
-# Public API (Stage 2)
+# Public API
 # ----------------------------
 
 func request_chunk(chunk_pos: Vector2i, cb: Callable) -> void:
@@ -163,25 +170,34 @@ func request_chunk(chunk_pos: Vector2i, cb: Callable) -> void:
 	arr.append(cb)
 	_gen_callbacks[chunk_pos] = arr
 
-func break_block_world(wx: int, wy: int, wz: int) -> void:
-	# If chunk isn't loaded yet, load it first then apply break.
+func break_block_world(wx: int, wy: int, wz: int) -> bool:
 	var cpos: Vector2i = _world_to_chunk(wx, wz)
 	if _cache.has(cpos):
-		_break_in_cached_chunk(cpos, wx, wy, wz)
-		return
+		return _break_in_cached_chunk(cpos, wx, wy, wz)
 
 	request_chunk(cpos, Callable(self, "_on_chunk_loaded_for_break").bind(wx, wy, wz))
+	return false
+
+func place_block_world(wx: int, wy: int, wz: int, runtime_id: int) -> bool:
+	var cpos: Vector2i = _world_to_chunk(wx, wz)
+	if _cache.has(cpos):
+		return _place_in_cached_chunk(cpos, wx, wy, wz, runtime_id)
+
+	request_chunk(cpos, Callable(self, "_on_chunk_loaded_for_place").bind(wx, wy, wz, runtime_id))
+	return false
 
 func get_spawn_position() -> Vector3:
 	var h: int = get_height_at_world(0, 0)
 	return Vector3(0.5, float(h + 3), 0.5)
 
 func get_height_at_world(wx: int, wz: int) -> int:
-	var n: float = _noise2(wx, wz)
+	if _main_noise == null:
+		_rebuild_main_noise()
+	var n: float = _main_noise.get_noise_2d(float(wx), float(wz))
 	var h: int = int(round(float(terrain_base_height) + n * float(terrain_height_scale)))
 	return clampi(h, 1, dims.y - 2)
 
-# Used by raycast + player grounding. Includes edits.
+# Used by raycast + collision. Includes edits.
 func get_block_at_world(wx: int, wy: int, wz: int) -> int:
 	if wy < 0 or wy >= dims.y:
 		return 0
@@ -191,12 +207,15 @@ func get_block_at_world(wx: int, wy: int, wz: int) -> int:
 	var origin_z: int = cpos.y * dims.z
 	var lx: int = wx - origin_x
 	var lz: int = wz - origin_z
+	if lx < 0 or lx >= dims.x or lz < 0 or lz >= dims.z:
+		# Shouldn't happen, but safe fallback.
+		var hh0: int = get_height_at_world(wx, wz)
+		return grass_runtime_id if wy <= hh0 else 0
 
 	var li: int = _idx_local(lx, wy, lz)
 
 	if _cache.has(cpos):
-		var ch_v: Variant = _cache[cpos]
-		var ch: Dictionary = ch_v as Dictionary
+		var ch: Dictionary = _cache[cpos] as Dictionary
 		var vox_v: Variant = ch.get("voxels")
 		if typeof(vox_v) == TYPE_PACKED_BYTE_ARRAY:
 			var vox: PackedByteArray = vox_v as PackedByteArray
@@ -212,19 +231,27 @@ func get_block_at_world(wx: int, wy: int, wz: int) -> int:
 	return grass_runtime_id if wy <= hgt else 0
 
 func get_surface_y(wx: int, wz: int) -> int:
-	# Returns the top face Y (block_y + 1) of the highest solid block at (wx,wz),
-	# considering edits. Stage 2 only breaks, so we start from base height and scan down.
-	var hgt: int = get_height_at_world(wx, wz)
-	var start_y: int = clampi(hgt + 1, 0, dims.y - 1)
+	# Fast path: use cached heightmap if available.
+	var cpos: Vector2i = _world_to_chunk(wx, wz)
+	if _cache.has(cpos):
+		var ch: Dictionary = _cache[cpos] as Dictionary
+		var hm_v: Variant = ch.get("heightmap")
+		if typeof(hm_v) == TYPE_PACKED_INT32_ARRAY:
+			var hm: PackedInt32Array = hm_v as PackedInt32Array
+			var origin_x: int = cpos.x * dims.x
+			var origin_z: int = cpos.y * dims.z
+			var lx: int = wx - origin_x
+			var lz: int = wz - origin_z
+			if lx >= 0 and lx < dims.x and lz >= 0 and lz < dims.z:
+				var hi: int = lx + lz * dims.x
+				if hi >= 0 and hi < hm.size():
+					return int(hm[hi]) + 1
 
-	for y in range(start_y, -1, -1):
-		var rid: int = get_block_at_world(wx, y, wz)
-		if rid != 0:
-			return y + 1
-	return 0
+	# Fallback: deterministic height
+	return get_height_at_world(wx, wz) + 1
 
 # ----------------------------
-# Internal: break + edits + remesh
+# Break / Place (cached)
 # ----------------------------
 
 func _on_chunk_loaded_for_break(result: Dictionary, wx: int, wy: int, wz: int) -> void:
@@ -234,51 +261,102 @@ func _on_chunk_loaded_for_break(result: Dictionary, wx: int, wy: int, wz: int) -
 	if _cache.has(cpos):
 		_break_in_cached_chunk(cpos, wx, wy, wz)
 
-func _break_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int) -> void:
-	if wy < 0 or wy >= dims.y:
+func _on_chunk_loaded_for_place(result: Dictionary, wx: int, wy: int, wz: int, runtime_id: int) -> void:
+	if result.has("error"):
 		return
+	var cpos: Vector2i = _world_to_chunk(wx, wz)
+	if _cache.has(cpos):
+		_place_in_cached_chunk(cpos, wx, wy, wz, runtime_id)
 
-	var ch_v: Variant = _cache[chunk_pos]
-	var ch: Dictionary = ch_v as Dictionary
+func _break_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int) -> bool:
+	if wy < 0 or wy >= dims.y:
+		return false
 
+	var ch: Dictionary = _cache[chunk_pos] as Dictionary
 	var vox_v: Variant = ch.get("voxels")
 	if typeof(vox_v) != TYPE_PACKED_BYTE_ARRAY:
-		return
+		return false
 	var vox: PackedByteArray = vox_v as PackedByteArray
 
 	var origin_x: int = chunk_pos.x * dims.x
 	var origin_z: int = chunk_pos.y * dims.z
 	var lx: int = wx - origin_x
 	var lz: int = wz - origin_z
-
 	if lx < 0 or lx >= dims.x or lz < 0 or lz >= dims.z:
-		return
+		return false
 
 	var li: int = _idx_local(lx, wy, lz)
 	if li < 0 or li >= vox.size():
-		return
+		return false
 
 	var old_id: int = int(vox[li])
 	if old_id == 0:
-		return
+		return false
 
-	# Apply break
 	vox[li] = 0
 	ch["voxels"] = vox
+
+	# Update heightmap for this column (fast surface queries)
+	_update_heightmap_for_column(ch, lx, lz, vox)
+
 	_cache[chunk_pos] = ch
 
-	# Record sparse edit
 	var edits_v: Variant = _chunk_edits.get(chunk_pos, {})
 	var edits: Dictionary = edits_v as Dictionary
 	edits[li] = 0
 	_chunk_edits[chunk_pos] = edits
 
-	# Emit a hardcoded “drop”
 	emit_signal("block_broken", Vector3i(wx, wy, wz), old_id)
 
-	# Remesh this chunk (+ neighbors if edge)
 	_schedule_remesh(chunk_pos)
+	_schedule_neighbor_remesh_if_edge(chunk_pos, lx, lz)
+	return true
 
+func _place_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int, runtime_id: int) -> bool:
+	if wy < 0 or wy >= dims.y:
+		return false
+	if runtime_id == 0:
+		return false
+
+	var ch: Dictionary = _cache[chunk_pos] as Dictionary
+	var vox_v: Variant = ch.get("voxels")
+	if typeof(vox_v) != TYPE_PACKED_BYTE_ARRAY:
+		return false
+	var vox: PackedByteArray = vox_v as PackedByteArray
+
+	var origin_x: int = chunk_pos.x * dims.x
+	var origin_z: int = chunk_pos.y * dims.z
+	var lx: int = wx - origin_x
+	var lz: int = wz - origin_z
+	if lx < 0 or lx >= dims.x or lz < 0 or lz >= dims.z:
+		return false
+
+	var li: int = _idx_local(lx, wy, lz)
+	if li < 0 or li >= vox.size():
+		return false
+
+	if int(vox[li]) != 0:
+		return false
+
+	vox[li] = runtime_id
+	ch["voxels"] = vox
+
+	_update_heightmap_for_column(ch, lx, lz, vox)
+
+	_cache[chunk_pos] = ch
+
+	var edits_v: Variant = _chunk_edits.get(chunk_pos, {})
+	var edits: Dictionary = edits_v as Dictionary
+	edits[li] = runtime_id
+	_chunk_edits[chunk_pos] = edits
+
+	emit_signal("block_placed", Vector3i(wx, wy, wz), runtime_id)
+
+	_schedule_remesh(chunk_pos)
+	_schedule_neighbor_remesh_if_edge(chunk_pos, lx, lz)
+	return true
+
+func _schedule_neighbor_remesh_if_edge(chunk_pos: Vector2i, lx: int, lz: int) -> void:
 	if lx == 0:
 		_schedule_remesh(Vector2i(chunk_pos.x - 1, chunk_pos.y))
 	elif lx == dims.x - 1:
@@ -292,7 +370,9 @@ func _break_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int) -> v
 func _schedule_remesh(chunk_pos: Vector2i) -> void:
 	if not _cache.has(chunk_pos):
 		return
+	# If a mesh build is already running, mark dirty so we rebuild again afterwards.
 	if _mesh_jobs.has(chunk_pos):
+		_mesh_dirty[chunk_pos] = true
 		return
 	if _pending_mesh.has(chunk_pos):
 		return
@@ -309,11 +389,41 @@ func _on_mesh_built(chunk_pos: Vector2i, result_v: Variant) -> void:
 	var mesh_arrays: Dictionary = arrays_v as Dictionary
 
 	if _cache.has(chunk_pos):
-		var ch: Dictionary = (_cache[chunk_pos] as Dictionary)
+		var ch: Dictionary = _cache[chunk_pos] as Dictionary
 		ch["mesh_arrays"] = mesh_arrays
 		_cache[chunk_pos] = ch
 
 	emit_signal("chunk_mesh_updated", chunk_pos, mesh_arrays)
+
+	# If edits happened during the build, schedule another rebuild now.
+	if _mesh_dirty.has(chunk_pos):
+		_mesh_dirty.erase(chunk_pos)
+		_schedule_remesh(chunk_pos)
+
+# ----------------------------
+# Heightmap
+# ----------------------------
+
+func _update_heightmap_for_column(ch: Dictionary, lx: int, lz: int, vox: PackedByteArray) -> void:
+	var hm_v: Variant = ch.get("heightmap")
+	var hm: PackedInt32Array
+	if typeof(hm_v) == TYPE_PACKED_INT32_ARRAY:
+		hm = hm_v as PackedInt32Array
+	else:
+		hm = PackedInt32Array()
+		hm.resize(dims.x * dims.z)
+
+	var hi: int = lx + lz * dims.x
+	var top: int = -1
+	# Scan down from top for this column only.
+	for y in range(dims.y - 1, -1, -1):
+		var li: int = _idx_local(lx, y, lz)
+		if li >= 0 and li < vox.size() and int(vox[li]) != 0:
+			top = y
+			break
+
+	hm[hi] = top
+	ch["heightmap"] = hm
 
 # ----------------------------
 # Jobs: cfg builders
@@ -322,7 +432,6 @@ func _on_mesh_built(chunk_pos: Vector2i, result_v: Variant) -> void:
 func _build_gen_job_cfg(chunk_pos: Vector2i) -> Dictionary:
 	var edits_v: Variant = _chunk_edits.get(chunk_pos, {})
 	var edits: Dictionary = edits_v as Dictionary
-
 	var neighbors: Dictionary = _get_neighbor_voxels(chunk_pos)
 
 	return {
@@ -340,7 +449,6 @@ func _build_mesh_job_payload(chunk_pos: Vector2i) -> Dictionary:
 	var ch: Dictionary = _cache[chunk_pos] as Dictionary
 	var vox_v: Variant = ch.get("voxels")
 	var vox: PackedByteArray = vox_v as PackedByteArray
-
 	var neighbors: Dictionary = _get_neighbor_voxels(chunk_pos)
 
 	return {
@@ -355,19 +463,11 @@ func _build_mesh_job_payload(chunk_pos: Vector2i) -> Dictionary:
 	}
 
 func _get_neighbor_voxels(chunk_pos: Vector2i) -> Dictionary:
-	# Returns {"W": PackedByteArray, "E":..., "N":..., "S":...} only for cached neighbors.
 	var out: Dictionary = {}
-
-	var west := Vector2i(chunk_pos.x - 1, chunk_pos.y)
-	var east := Vector2i(chunk_pos.x + 1, chunk_pos.y)
-	var north := Vector2i(chunk_pos.x, chunk_pos.y - 1)
-	var south := Vector2i(chunk_pos.x, chunk_pos.y + 1)
-
-	_try_put_neighbor_voxels(out, "W", west)
-	_try_put_neighbor_voxels(out, "E", east)
-	_try_put_neighbor_voxels(out, "N", north)
-	_try_put_neighbor_voxels(out, "S", south)
-
+	_try_put_neighbor_voxels(out, "W", Vector2i(chunk_pos.x - 1, chunk_pos.y))
+	_try_put_neighbor_voxels(out, "E", Vector2i(chunk_pos.x + 1, chunk_pos.y))
+	_try_put_neighbor_voxels(out, "N", Vector2i(chunk_pos.x, chunk_pos.y - 1))
+	_try_put_neighbor_voxels(out, "S", Vector2i(chunk_pos.x, chunk_pos.y + 1))
 	return out
 
 func _try_put_neighbor_voxels(out: Dictionary, key: String, pos: Vector2i) -> void:
@@ -409,10 +509,7 @@ func _finish_with_error(chunk_pos: Vector2i, msg: String) -> void:
 		_gen_callbacks.erase(chunk_pos)
 		for i in range(arr.size()):
 			var cb: Callable = arr[i] as Callable
-			cb.call({
-				"chunk_pos": chunk_pos,
-				"error": msg
-			})
+			cb.call({"chunk_pos": chunk_pos, "error": msg})
 
 func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	var local_seed: int = int(cfg["seed"])
@@ -424,7 +521,6 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 
 	var edits_v: Variant = cfg.get("edits", {})
 	var edits: Dictionary = edits_v as Dictionary
-
 	var neighbors_v: Variant = cfg.get("neighbors", {})
 	var neighbors: Dictionary = neighbors_v as Dictionary
 
@@ -467,6 +563,18 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 		if li >= 0 and li < vox.size():
 			vox[li] = int(edits[li])
 
+	# Build heightmap (top solid y per column)
+	var hm := PackedInt32Array()
+	hm.resize(sx * sz)
+	for z in range(sz):
+		for x in range(sx):
+			var top: int = -1
+			for y in range(sy - 1, -1, -1):
+				if int(vox[idx.call(x, y, z)]) != 0:
+					top = y
+					break
+			hm[x + z * sx] = top
+
 	# World sampler with neighbor support
 	var get_block_world := func(wx: int, wy: int, wz: int) -> int:
 		if wy < 0 or wy >= sy:
@@ -477,27 +585,26 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 		if lx >= 0 and lx < sx and lz >= 0 and lz < sz:
 			return int(vox[idx.call(lx, wy, lz)])
 
-		# Neighbor sampling for boundaries
 		if lx < 0 and neighbors.has("W"):
-			var nvox: PackedByteArray = neighbors["W"] as PackedByteArray
+			var wvox: PackedByteArray = neighbors["W"] as PackedByteArray
 			var nx: int = lx + sx
 			if nx >= 0 and nx < sx and lz >= 0 and lz < sz:
-				return int(nvox[idx.call(nx, wy, lz)])
+				return int(wvox[idx.call(nx, wy, lz)])
 		if lx >= sx and neighbors.has("E"):
 			var evox: PackedByteArray = neighbors["E"] as PackedByteArray
 			var ex: int = lx - sx
 			if ex >= 0 and ex < sx and lz >= 0 and lz < sz:
 				return int(evox[idx.call(ex, wy, lz)])
 		if lz < 0 and neighbors.has("N"):
-			var nvox2: PackedByteArray = neighbors["N"] as PackedByteArray
+			var nvox: PackedByteArray = neighbors["N"] as PackedByteArray
 			var nz: int = lz + sz
 			if lx >= 0 and lx < sx and nz >= 0 and nz < sz:
-				return int(nvox2[idx.call(lx, wy, nz)])
+				return int(nvox[idx.call(lx, wy, nz)])
 		if lz >= sz and neighbors.has("S"):
 			var svox: PackedByteArray = neighbors["S"] as PackedByteArray
-			var sz2: int = lz - sz
-			if lx >= 0 and lx < sx and sz2 >= 0 and sz2 < sz:
-				return int(svox[idx.call(lx, wy, sz2)])
+			var zz: int = lz - sz
+			if lx >= 0 and lx < sx and zz >= 0 and zz < sz:
+				return int(svox[idx.call(lx, wy, zz)])
 
 		var hh2: int = int(height_at.call(wx, wz))
 		return grass_id if wy <= hh2 else 0
@@ -518,7 +625,8 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 		"origin": chunk_origin_world,
 		"dims": local_dims,
 		"voxels": vox,
-		"mesh_arrays": mesh_arrays
+		"mesh_arrays": mesh_arrays,
+		"heightmap": hm
 	}
 
 func _thread_build_mesh(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
@@ -599,13 +707,10 @@ func _thread_build_mesh(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 			return rid != 0
 	)
 
-	return {
-		"chunk_pos": chunk_pos,
-		"mesh_arrays": mesh_arrays
-	}
+	return {"chunk_pos": chunk_pos, "mesh_arrays": mesh_arrays}
 
 # ----------------------------
-# Helpers
+# Config / helpers
 # ----------------------------
 
 func _apply_worldgen(worldgen_cfg: Dictionary) -> void:
@@ -656,12 +761,11 @@ func _load_or_create_world_files() -> void:
 			parsed["last_played_utc"] = Time.get_datetime_string_from_system(true)
 			KZ_PathUtil.write_text(level_path, JSON.stringify(parsed, "\t"))
 
-func _noise2(wx: int, wz: int) -> float:
-	var noise: FastNoiseLite = FastNoiseLite.new()
-	noise.seed = world_seed
-	noise.noise_type = FastNoiseLite.TYPE_PERLIN
-	noise.frequency = terrain_frequency
-	return noise.get_noise_2d(float(wx), float(wz))
+func _rebuild_main_noise() -> void:
+	_main_noise = FastNoiseLite.new()
+	_main_noise.seed = world_seed
+	_main_noise.noise_type = FastNoiseLite.TYPE_PERLIN
+	_main_noise.frequency = terrain_frequency
 
 func _world_to_chunk(wx: int, wz: int) -> Vector2i:
 	var cx: int = int(floor(float(wx) / float(dims.x)))

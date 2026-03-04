@@ -7,10 +7,11 @@ class BlockDef extends RefCounted:
 	var tint: Color = Color(1, 1, 1, 1)
 	var transparent: bool = false
 	var light_level: int = 0
+	var texture_all_path: String = ""  # NEW
 
-var _by_string: Dictionary = {}          # string_id -> BlockDef
-var _runtime_by_string: Dictionary = {}  # string_id -> int
-var _string_by_runtime: Array[String] = []  # runtime_id -> string_id
+var _by_string: Dictionary = {}
+var _runtime_by_string: Dictionary = {}
+var _string_by_runtime: Array[String] = []
 
 func _init() -> void:
 	_add_builtin_air()
@@ -50,6 +51,12 @@ func load_from_folder(folder_user_path: String) -> void:
 		var tint_str: String = String(parsed.get("tint", "#ffffff"))
 		bd.tint = _parse_hex_color(tint_str)
 
+		# NEW: textures
+		var textures_v: Variant = parsed.get("textures", {})
+		if typeof(textures_v) == TYPE_DICTIONARY:
+			var textures: Dictionary = textures_v as Dictionary
+			bd.texture_all_path = String(textures.get("all", "")).strip_edges()
+
 		_register_runtime(bd)
 
 func _register_runtime(bd: BlockDef) -> void:
@@ -87,7 +94,4 @@ func _parse_hex_color(s: String) -> Color:
 	var t: String = s.strip_edges()
 	if not t.begins_with("#"):
 		t = "#" + t
-	# Color.html() safely parses #RRGGBB / #RRGGBBAA
-	var c: Color = Color.WHITE
-	c = Color.html(t)
-	return c
+	return Color.html(t)
