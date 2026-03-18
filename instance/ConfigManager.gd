@@ -55,6 +55,7 @@ func ensure_defaults(instance_root: String) -> void:
 				"frequency": 0.008,
 				"base_height": 64,
 				"height_scale": 28,
+				"sea_level": 62,
 				"tree_spawn_chance_percent": 1,
 				"tree_edge_margin": 3
 			}
@@ -91,7 +92,7 @@ func _ensure_default_block_files(blocks_dir: String) -> void:
 			"id": "kaizencraft:grass",
 			"name": "Grass",
 			"textures": {
-				"side": "res://assets/textures/blocks/grass.png",
+				"side": "res://assets/textures/blocks/grass_side.png",
 				"top": "res://assets/textures/blocks/grass_top.png",
 				"bottom": "res://assets/textures/blocks/dirt.png"
 			},
@@ -138,6 +139,52 @@ func _ensure_default_block_files(blocks_dir: String) -> void:
 		}
 	)
 
+
+	_ensure_block_file(
+		KZ_PathUtil.join(blocks_dir, "water.json"),
+		{
+			"id": "kaizencraft:water",
+			"name": "Water",
+			"textures": {"all": "res://assets/textures/blocks/water.png"},
+			"tint": "#5fa8ff",
+			"hardness": 100.0,
+			"required_tool": "none",
+			"drops": [],
+			"transparency": true,
+			"collidable": false,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(blocks_dir, "stone.json"),
+		{
+			"id": "kaizencraft:stone",
+			"name": "Stone",
+			"textures": {"all": "res://assets/textures/blocks/stone.png"},
+			"tint": "#8d8d8d",
+			"hardness": 2.2,
+			"required_tool": "none",
+			"drops": [{"item": "kaizencraft:stone", "count": 1}],
+			"transparency": false,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(blocks_dir, "sand.json"),
+		{
+			"id": "kaizencraft:sand",
+			"name": "Sand",
+			"textures": {"all": "res://assets/textures/blocks/sand.png"},
+			"tint": "#d6c27a",
+			"hardness": 0.6,
+			"required_tool": "none",
+			"drops": [{"item": "kaizencraft:sand", "count": 1}],
+			"transparency": false,
+			"light_level": 0
+		}
+	)
 	_ensure_block_file(
 		KZ_PathUtil.join(blocks_dir, "oak_leaves.json"),
 		{

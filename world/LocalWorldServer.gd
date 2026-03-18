@@ -10,12 +10,13 @@ var world_seed: int = 1337
 var dims: Vector3i = Vector3i(16, 256, 16)
 var view_distance_chunks: int = 6
 
-var max_worker_threads: int = 3
+var max_worker_threads: int = 1
 var cache_max_chunks: int = 256
 
 var terrain_frequency: float = 0.008
 var terrain_base_height: int = 64
 var terrain_height_scale: int = 28
+var sea_level: int = 62
 var tree_spawn_chance_percent: int = 1
 var tree_edge_margin: int = 3
 
@@ -26,6 +27,9 @@ var oak_log_runtime_id: int = 1
 var oak_leaves_runtime_id: int = 1
 var oak_planks_runtime_id: int = 1
 var crafting_table_runtime_id: int = 1
+var water_runtime_id: int = 1
+var stone_runtime_id: int = 1
+var sand_runtime_id: int = 1
 
 # Main-thread noise (performance)
 var _main_noise: FastNoiseLite
@@ -69,6 +73,9 @@ func setup(p_world_root: String, worldgen_cfg: Dictionary, block_registry: KZ_Bl
 	oak_leaves_runtime_id = registry.get_runtime_id("kaizencraft:oak_leaves")
 	oak_planks_runtime_id = registry.get_runtime_id("kaizencraft:oak_planks")
 	crafting_table_runtime_id = registry.get_runtime_id("kaizencraft:crafting_table")
+	water_runtime_id = registry.get_runtime_id("kaizencraft:water")
+	stone_runtime_id = registry.get_runtime_id("kaizencraft:stone")
+	sand_runtime_id = registry.get_runtime_id("kaizencraft:sand")
 
 func _exit_tree() -> void:
 	_join_all_threads()
@@ -208,8 +215,8 @@ func place_block_world(wx: int, wy: int, wz: int, runtime_id: int) -> bool:
 	return false
 
 func get_spawn_position() -> Vector3:
-	var h: int = get_height_at_world(0, 0)
-	return Vector3(0.5, float(h + 3), 0.5)
+	var surface_y: int = get_surface_y(0, 0)
+	return Vector3(0.5, float(surface_y + 2), 0.5)
 
 func get_height_at_world(wx: int, wz: int) -> int:
 	if _main_noise == null:
@@ -268,10 +275,15 @@ func _mark_chunk_edits_dirty() -> void:
 
 func _get_generated_block_at_world(wx: int, wy: int, wz: int) -> int:
 	var hgt: int = get_height_at_world(wx, wz)
+	var top_id: int = grass_runtime_id if hgt > sea_level + 1 else sand_runtime_id
 	if wy <= hgt:
 		if wy == hgt:
-			return grass_runtime_id
-		return dirt_runtime_id
+			return top_id
+		if wy >= hgt - 3:
+			return dirt_runtime_id if top_id == grass_runtime_id else sand_runtime_id
+		return stone_runtime_id
+	if wy <= sea_level:
+		return water_runtime_id
 	return _get_generated_tree_block_at_world(wx, wy, wz)
 
 func _get_generated_tree_block_at_world(wx: int, wy: int, wz: int) -> int:
@@ -288,6 +300,8 @@ func _get_generated_tree_block_at_world(wx: int, wy: int, wz: int) -> int:
 			if lz < tree_edge_margin or lz >= dims.z - tree_edge_margin:
 				continue
 			var ground_y: int = get_height_at_world(tx, tz)
+			if ground_y <= sea_level + 1:
+				continue
 			if not _should_place_tree_at_world(tx, tz, ground_y, height_at_callable, world_seed):
 				continue
 			var variant: int = _tree_variant_for_world(tx, tz, world_seed)
@@ -316,8 +330,8 @@ func get_surface_y(wx: int, wz: int) -> int:
 				if hi >= 0 and hi < hm.size():
 					return int(hm[hi]) + 1
 
-	# Fallback: deterministic height
-	return get_height_at_world(wx, wz) + 1
+	# Fallback: deterministic surface including sea level
+	return maxi(get_height_at_world(wx, wz) + 1, sea_level + 1)
 
 # ----------------------------
 # Break / Place (cached)
@@ -378,7 +392,7 @@ func _break_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int) -> b
 
 	emit_signal("block_broken", Vector3i(wx, wy, wz), old_id)
 
-	_rebuild_chunk_mesh_now(chunk_pos)
+	_schedule_remesh_front(chunk_pos)
 	_rebuild_neighbor_mesh_if_edge(chunk_pos, lx, lz)
 	return true
 
@@ -423,7 +437,7 @@ func _place_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int, runt
 
 	emit_signal("block_placed", Vector3i(wx, wy, wz), runtime_id)
 
-	_rebuild_chunk_mesh_now(chunk_pos)
+	_schedule_remesh_front(chunk_pos)
 	_rebuild_neighbor_mesh_if_edge(chunk_pos, lx, lz)
 	return true
 
@@ -539,6 +553,10 @@ func _update_heightmap_for_column(ch: Dictionary, lx: int, lz: int, vox: PackedB
 
 	hm[hi] = top
 	ch["heightmap"] = hm
+	var mesh_top: int = max(sea_level, 0)
+	for hm_entry in hm:
+		mesh_top = maxi(mesh_top, int(hm_entry))
+	ch["mesh_y_max"] = clampi(mesh_top + 2, 0, dims.y - 1)
 
 # ----------------------------
 # Jobs: cfg builders
@@ -561,6 +579,10 @@ func _build_gen_job_cfg(chunk_pos: Vector2i) -> Dictionary:
 		"leaves_id": oak_leaves_runtime_id,
 		"planks_id": oak_planks_runtime_id,
 		"crafting_table_id": crafting_table_runtime_id,
+		"water_id": water_runtime_id,
+		"stone_id": stone_runtime_id,
+		"sand_id": sand_runtime_id,
+		"sea_level": sea_level,
 		"edits": edits,
 		"neighbors": neighbors
 	}
@@ -570,7 +592,7 @@ func _build_mesh_job_payload(chunk_pos: Vector2i) -> Dictionary:
 	var vox_v: Variant = ch.get("voxels")
 	var vox: PackedByteArray = vox_v as PackedByteArray
 	var neighbors: Dictionary = _get_neighbor_voxels(chunk_pos)
-	var mesh_y_max: int = _estimate_mesh_y_max(vox)
+	var mesh_y_max: int = int(ch.get("mesh_y_max", _estimate_mesh_y_max(vox)))
 
 	return {
 		"seed": world_seed,
@@ -584,6 +606,10 @@ func _build_mesh_job_payload(chunk_pos: Vector2i) -> Dictionary:
 		"leaves_id": oak_leaves_runtime_id,
 		"planks_id": oak_planks_runtime_id,
 		"crafting_table_id": crafting_table_runtime_id,
+		"water_id": water_runtime_id,
+		"stone_id": stone_runtime_id,
+		"sand_id": sand_runtime_id,
+		"sea_level": sea_level,
 		"voxels": vox,
 		"neighbors": neighbors,
 		"mesh_y_max": mesh_y_max,
@@ -673,6 +699,10 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	var leaves_id: int = int(cfg.get("leaves_id", grass_id))
 	var planks_id: int = int(cfg.get("planks_id", dirt_id))
 	var crafting_table_id: int = int(cfg.get("crafting_table_id", planks_id))
+	var water_id: int = int(cfg.get("water_id", 0))
+	var stone_id: int = int(cfg.get("stone_id", dirt_id))
+	var sand_id: int = int(cfg.get("sand_id", dirt_id))
+	var local_sea_level: int = int(cfg.get("sea_level", base_h - 2))
 
 	var edits_v: Variant = cfg.get("edits", {})
 	var edits: Dictionary = edits_v as Dictionary
@@ -697,7 +727,7 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	var height_at := func(wx: int, wz: int) -> int:
 		var n: float = noise.get_noise_2d(float(wx), float(wz))
 		var h: int = int(round(float(base_h) + n * float(scale_h)))
-		return clampi(h, 1, sy - 2)
+		return clampi(h, 1, local_dims.y - 2)
 
 	var vox := PackedByteArray()
 	vox.resize(sx * sy * sz)
@@ -707,20 +737,23 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 			var wx: int = origin_x + x
 			var wz: int = origin_z + z
 			var hh: int = int(height_at.call(wx, wz))
+			var top_id: int = grass_id if hh > local_sea_level + 1 else sand_id
 			for y in range(sy):
 				if y > hh:
-					vox[idx.call(x, y, z)] = 0
+					vox[idx.call(x, y, z)] = water_id if y <= local_sea_level else 0
 				elif y == hh:
-					vox[idx.call(x, y, z)] = grass_id
+					vox[idx.call(x, y, z)] = top_id
+				elif y >= hh - 3:
+					vox[idx.call(x, y, z)] = dirt_id if top_id == grass_id else sand_id
 				else:
-					vox[idx.call(x, y, z)] = dirt_id
+					vox[idx.call(x, y, z)] = stone_id
 
 	for z in range(tree_edge_margin, sz - tree_edge_margin):
 		for x in range(tree_edge_margin, sx - tree_edge_margin):
 			var wx_tree: int = origin_x + x
 			var wz_tree: int = origin_z + z
 			var ground_y: int = int(height_at.call(wx_tree, wz_tree))
-			if _should_place_tree_at_world(wx_tree, wz_tree, ground_y, height_at, local_seed):
+			if ground_y > local_sea_level + 1 and _should_place_tree_at_world(wx_tree, wz_tree, ground_y, height_at, local_seed):
 				_place_tree_into_voxels(vox, sx, sy, sz, x, ground_y + 1, z, log_id, leaves_id, _tree_variant_for_world(wx_tree, wz_tree, local_seed))
 
 	# Apply sparse edits
@@ -743,7 +776,33 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 					break
 			hm[x + z * sx] = top
 
-	# World sampler with neighbor support
+	# World sampler with neighbor support and deterministic fallback for uncached neighbors.
+	var generated_block_at := func(wx: int, wy: int, wz: int) -> int:
+		var hh2: int = int(height_at.call(wx, wz))
+		var top_id2: int = grass_id if hh2 > local_sea_level + 1 else sand_id
+		if wy <= hh2:
+			if wy == hh2:
+				return top_id2
+			if wy >= hh2 - 3:
+				return dirt_id if top_id2 == grass_id else sand_id
+			return stone_id
+		if wy <= local_sea_level:
+			return water_id
+		for tz in range(wz - 3, wz + 4):
+			for tx in range(wx - 3, wx + 4):
+				var ground_y2: int = int(height_at.call(tx, tz))
+				if ground_y2 <= local_sea_level + 1:
+					continue
+				if not _should_place_tree_at_world(tx, tz, ground_y2, height_at, local_seed):
+					continue
+				var variant2: int = _tree_variant_for_world(tx, tz, local_seed)
+				var trunk_height2: int = _tree_trunk_height_for_variant(variant2)
+				var base_y2: int = ground_y2 + 1
+				if wx == tx and wz == tz and wy >= base_y2 and wy < base_y2 + trunk_height2:
+					return log_id
+				if _tree_has_block_at_variant(variant2, tx, base_y2, tz, wx, wy, wz):
+					return leaves_id
+		return 0
 	var get_block_world := func(wx: int, wy: int, wz: int) -> int:
 		if wy < 0 or wy >= sy:
 			return 0
@@ -774,30 +833,34 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 			if lx >= 0 and lx < sx and zz >= 0 and zz < sz:
 				return int(svox[idx.call(lx, wy, zz)])
 
-		var hh2: int = int(height_at.call(wx, wz))
-		if wy > hh2:
-			return 0
-		if wy == hh2:
-			return grass_id
-		return dirt_id
+		return int(generated_block_at.call(wx, wy, wz))
 
 	var chunk_origin_world := Vector3(origin_x, 0, origin_z)
 	var mesh_y_max: int = 0
 	for hm_v in hm:
 		mesh_y_max = maxi(mesh_y_max, int(hm_v))
-	mesh_y_max = clampi(mesh_y_max + 8, 0, sy - 1)
+	mesh_y_max = clampi(mesh_y_max + 2, 0, sy - 1)
 
 	var face_material_for_runtime := func(rid: int, axis: int, dir: int) -> int:
 		return _face_material_id_for_runtime(rid, axis, dir, grass_id, dirt_id, log_id, leaves_id, planks_id, crafting_table_id)
-	var is_runtime_solid := func(rid: int) -> bool:
+	var is_runtime_renderable := func(rid: int) -> bool:
 		return rid != 0
+	var face_occludes_neighbor := func(a_rid: int, b_rid: int, _axis: int, _dir: int) -> bool:
+		if a_rid == 0:
+			return false
+		if a_rid == water_id:
+			return b_rid != 0 and b_rid != leaves_id
+		if a_rid == leaves_id:
+			return b_rid != 0 and b_rid != water_id and b_rid != leaves_id
+		return b_rid != 0 and b_rid != water_id
 
 	var mesh_arrays: Dictionary = KZ_ChunkMeshBuilder.build_mesh_arrays(
 		chunk_origin_world,
 		local_dims,
 		get_block_world,
 		face_material_for_runtime,
-		is_runtime_solid,
+		is_runtime_renderable,
+		face_occludes_neighbor,
 		mesh_y_max
 	)
 
@@ -807,7 +870,8 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 		"dims": local_dims,
 		"voxels": vox,
 		"mesh_arrays": mesh_arrays,
-		"heightmap": hm
+		"heightmap": hm,
+		"mesh_y_max": mesh_y_max
 	}
 
 func _thread_build_mesh(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
@@ -825,6 +889,10 @@ func _build_mesh_result(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 	var leaves_id: int = int(payload.get("leaves_id", grass_id))
 	var planks_id: int = int(payload.get("planks_id", dirt_id))
 	var crafting_table_id: int = int(payload.get("crafting_table_id", planks_id))
+	var water_id: int = int(payload.get("water_id", 0))
+	var stone_id: int = int(payload.get("stone_id", dirt_id))
+	var sand_id: int = int(payload.get("sand_id", dirt_id))
+	var local_sea_level: int = int(payload.get("sea_level", base_h - 2))
 
 	var vox_v: Variant = payload.get("voxels")
 	var vox: PackedByteArray = vox_v as PackedByteArray
@@ -850,8 +918,34 @@ func _build_mesh_result(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 	var height_at := func(wx: int, wz: int) -> int:
 		var n: float = noise.get_noise_2d(float(wx), float(wz))
 		var h: int = int(round(float(base_h) + n * float(scale_h)))
-		return clampi(h, 1, sy - 2)
+		return clampi(h, 1, local_dims.y - 2)
 
+	var generated_block_at := func(wx: int, wy: int, wz: int) -> int:
+		var hh: int = int(height_at.call(wx, wz))
+		var top_id: int = grass_id if hh > local_sea_level + 1 else sand_id
+		if wy <= hh:
+			if wy == hh:
+				return top_id
+			if wy >= hh - 3:
+				return dirt_id if top_id == grass_id else sand_id
+			return stone_id
+		if wy <= local_sea_level:
+			return water_id
+		for tz in range(wz - 3, wz + 4):
+			for tx in range(wx - 3, wx + 4):
+				var ground_y2: int = int(height_at.call(tx, tz))
+				if ground_y2 <= local_sea_level + 1:
+					continue
+				if not _should_place_tree_at_world(tx, tz, ground_y2, height_at, local_seed):
+					continue
+				var variant2: int = _tree_variant_for_world(tx, tz, local_seed)
+				var trunk_height2: int = _tree_trunk_height_for_variant(variant2)
+				var base_y2: int = ground_y2 + 1
+				if wx == tx and wz == tz and wy >= base_y2 and wy < base_y2 + trunk_height2:
+					return log_id
+				if _tree_has_block_at_variant(variant2, tx, base_y2, tz, wx, wy, wz):
+					return leaves_id
+		return 0
 	var get_block_world := func(wx: int, wy: int, wz: int) -> int:
 		if wy < 0 or wy >= sy:
 			return 0
@@ -882,26 +976,30 @@ func _build_mesh_result(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 			if lx >= 0 and lx < sx and zz >= 0 and zz < sz:
 				return int(svox[idx.call(lx, wy, zz)])
 
-		var hh: int = int(height_at.call(wx, wz))
-		if wy > hh:
-			return 0
-		if wy == hh:
-			return grass_id
-		return dirt_id
+		return int(generated_block_at.call(wx, wy, wz))
 
 	var chunk_origin_world := Vector3(origin_x, 0, origin_z)
-	var mesh_y_max: int = clampi(int(payload.get("mesh_y_max", sy - 1)) + 4, 0, sy - 1)
+	var mesh_y_max: int = clampi(int(payload.get("mesh_y_max", sy - 1)), 0, sy - 1)
 	var face_material_for_runtime := func(rid: int, axis: int, dir: int) -> int:
 		return _face_material_id_for_runtime(rid, axis, dir, grass_id, dirt_id, log_id, leaves_id, planks_id, crafting_table_id)
-	var is_runtime_solid := func(rid: int) -> bool:
+	var is_runtime_renderable := func(rid: int) -> bool:
 		return rid != 0
+	var face_occludes_neighbor := func(a_rid: int, b_rid: int, _axis: int, _dir: int) -> bool:
+		if a_rid == 0:
+			return false
+		if a_rid == water_id:
+			return b_rid != 0 and b_rid != leaves_id
+		if a_rid == leaves_id:
+			return b_rid != 0 and b_rid != water_id and b_rid != leaves_id
+		return b_rid != 0 and b_rid != water_id
 
 	var mesh_arrays: Dictionary = KZ_ChunkMeshBuilder.build_mesh_arrays(
 		chunk_origin_world,
 		local_dims,
 		get_block_world,
 		face_material_for_runtime,
-		is_runtime_solid,
+		is_runtime_renderable,
+		face_occludes_neighbor,
 		mesh_y_max
 	)
 
@@ -934,6 +1032,12 @@ func _face_material_id_for_runtime(rid: int, axis: int, dir: int, grass_id: int,
 		if axis == 1 and dir == -1:
 			return 6
 		return 7
+	if rid == water_runtime_id:
+		return 9
+	if rid == sand_runtime_id:
+		return 10
+	if rid == stone_runtime_id:
+		return 11
 	return 2
 
 func _should_place_tree_at_world(wx: int, wz: int, ground_y: int, height_at: Callable, local_seed: int) -> bool:
@@ -1078,10 +1182,12 @@ func _apply_worldgen(worldgen_cfg: Dictionary) -> void:
 	terrain_frequency = float(terrain_cfg.get("frequency", 0.008))
 	terrain_base_height = int(terrain_cfg.get("base_height", 64))
 	terrain_height_scale = int(terrain_cfg.get("height_scale", 28))
+	sea_level = int(terrain_cfg.get("sea_level", terrain_base_height - 2))
 	tree_spawn_chance_percent = int(terrain_cfg.get("tree_spawn_chance_percent", tree_spawn_chance_percent))
 	tree_edge_margin = int(terrain_cfg.get("tree_edge_margin", tree_edge_margin))
 	tree_spawn_chance_percent = clampi(tree_spawn_chance_percent, 0, 100)
 	tree_edge_margin = clampi(tree_edge_margin, 2, 6)
+	sea_level = clampi(sea_level, 1, dims.y - 8)
 
 
 func save_world_state() -> void:

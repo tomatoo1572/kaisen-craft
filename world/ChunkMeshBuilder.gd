@@ -10,7 +10,8 @@ static func build_mesh_arrays(
 	dims: Vector3i,
 	get_block_world: Callable,
 	get_face_material_id: Callable,
-	is_solid_runtime: Callable,
+	is_renderable_runtime: Callable,
+	face_occludes_neighbor: Callable,
 	max_mesh_y: int = -1
 ) -> Dictionary:
 	var vertices := PackedVector3Array()
@@ -25,19 +26,19 @@ static func build_mesh_arrays(
 		max_mesh_y = dims.y - 1
 	max_mesh_y = clampi(max_mesh_y, 0, dims.y - 1)
 
-	index_base = _mesh_dir(0, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
+	index_base = _mesh_dir(0, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_renderable_runtime, face_occludes_neighbor, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
-	index_base = _mesh_dir(0, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
-		vertices, normals, uvs, colors, indices, index_base)
-
-	index_base = _mesh_dir(1, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
-		vertices, normals, uvs, colors, indices, index_base)
-	index_base = _mesh_dir(1, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
+	index_base = _mesh_dir(0, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_renderable_runtime, face_occludes_neighbor, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
 
-	index_base = _mesh_dir(2, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
+	index_base = _mesh_dir(1, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_renderable_runtime, face_occludes_neighbor, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
-	index_base = _mesh_dir(2, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
+	index_base = _mesh_dir(1, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_renderable_runtime, face_occludes_neighbor, max_mesh_y,
+		vertices, normals, uvs, colors, indices, index_base)
+
+	index_base = _mesh_dir(2, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_renderable_runtime, face_occludes_neighbor, max_mesh_y,
+		vertices, normals, uvs, colors, indices, index_base)
+	index_base = _mesh_dir(2, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_renderable_runtime, face_occludes_neighbor, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
 
 	return {
@@ -55,7 +56,8 @@ static func _mesh_dir(
 	dims: Vector3i,
 	get_block_world: Callable,
 	get_face_material_id: Callable,
-	is_solid_runtime: Callable,
+	is_renderable_runtime: Callable,
+	face_occludes_neighbor: Callable,
 	max_mesh_y: int,
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
@@ -65,7 +67,6 @@ static func _mesh_dir(
 	index_base: int
 ) -> int:
 	var sx: int = dims.x
-	var sy: int = dims.y
 	var sz: int = dims.z
 
 	var u_size: int
@@ -114,7 +115,7 @@ static func _mesh_dir(
 				var wz: int = int(chunk_origin_world.z) + bz
 
 				var a: int = int(get_block_world.call(wx, wy, wz))
-				if not bool(is_solid_runtime.call(a)):
+				if not bool(is_renderable_runtime.call(a)):
 					mask[u + v * u_size] = 0
 					continue
 
@@ -129,7 +130,7 @@ static func _mesh_dir(
 					nz = wz + dir
 
 				var b: int = int(get_block_world.call(nx, ny, nz))
-				var visible: bool = not bool(is_solid_runtime.call(b))
+				var visible: bool = not bool(face_occludes_neighbor.call(a, b, axis, dir))
 				mask[u + v * u_size] = a if visible else 0
 
 		var v0: int = 0
@@ -268,8 +269,8 @@ static func _emit_quad(
 
 	colors.append(face_color); colors.append(face_color); colors.append(face_color); colors.append(face_color)
 
-	indices.append(i0); indices.append(i2); indices.append(i1)
-	indices.append(i0); indices.append(i3); indices.append(i2)
+	indices.append(i0); indices.append(i1); indices.append(i2)
+	indices.append(i0); indices.append(i2); indices.append(i3)
 
 	return index_base + 4
 

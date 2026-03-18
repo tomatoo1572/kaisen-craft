@@ -104,8 +104,10 @@ func _read_defs_from_folder(folder_user_path: String) -> Array[BlockDef]:
 			# Keep them solid for meshing and collidable so the player can stand on / bump into them.
 			bd.collidable = bool(parsed.get("collidable", true))
 		if bd.string_id == "kaizencraft:grass":
+			if bd.texture_side_path == "res://assets/textures/blocks/grass.png":
+				bd.texture_side_path = "res://assets/textures/blocks/grass_side.png"
 			if bd.texture_side_path == "" or not ResourceLoader.exists(bd.texture_side_path):
-				bd.texture_side_path = "res://assets/textures/blocks/grass.png"
+				bd.texture_side_path = "res://assets/textures/blocks/grass_side.png"
 			if bd.texture_top_path == "" or not ResourceLoader.exists(bd.texture_top_path) or bd.texture_top_path == bd.texture_side_path:
 				bd.texture_top_path = "res://assets/textures/blocks/grass_top.png"
 			if bd.texture_bottom_path == "" or not ResourceLoader.exists(bd.texture_bottom_path) or bd.texture_bottom_path == bd.texture_side_path:
@@ -138,6 +140,12 @@ func _order_hint_for_id(sid: String, fallback: int) -> int:
 			return 7
 		"kaizencraft:wooden_axe":
 			return 8
+		"kaizencraft:water":
+			return 9
+		"kaizencraft:stone":
+			return 10
+		"kaizencraft:sand":
+			return 11
 		_:
 			return fallback
 
@@ -193,7 +201,9 @@ func get_registered_entries() -> Array[Dictionary]:
 			"string_id": sid,
 			"name": def.name if def != null else sid,
 			"placeable": def.placeable if def != null else false,
-			"stack_size": def.stack_size if def != null else 64
+			"stack_size": def.stack_size if def != null else 64,
+			"category": _creative_category_for_def(def),
+			"order": def.order_hint if def != null else rid
 		})
 	return out
 
@@ -253,6 +263,12 @@ func _default_hardness_for_id(sid: String) -> float:
 			return 2.5
 		"kaizencraft:wooden_axe":
 			return 1.0
+		"kaizencraft:water":
+			return 100.0
+		"kaizencraft:stone":
+			return 2.2
+		"kaizencraft:sand":
+			return 0.6
 		_:
 			return 0.6
 
@@ -268,3 +284,33 @@ func _parse_hex_color(s: String) -> Color:
 	if not t.begins_with("#"):
 		t = "#" + t
 	return Color.html(t)
+
+func get_preview_paths(item_id: String) -> Dictionary:
+	var def: BlockDef = get_def_by_string(item_id)
+	if def == null:
+		return {}
+	return {
+		"top": def.texture_top_path,
+		"side": def.texture_side_path,
+		"bottom": def.texture_bottom_path,
+		"all": def.texture_all_path,
+		"mode": "block" if _looks_block_like(def) else "item"
+	}
+
+func _looks_block_like(def: BlockDef) -> bool:
+	if def == null:
+		return false
+	if def.preferred_tool != "":
+		return false
+	if def.string_id.ends_with(":stick"):
+		return false
+	return def.placeable
+
+func _creative_category_for_def(def: BlockDef) -> String:
+	if def == null:
+		return "Items"
+	if def.preferred_tool != "" or def.string_id.contains("axe"):
+		return "Tools"
+	if _looks_block_like(def):
+		return "Blocks"
+	return "Items"

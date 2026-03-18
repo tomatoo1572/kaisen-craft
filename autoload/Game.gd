@@ -16,9 +16,12 @@ const DEFAULT_CONTROLS := {
 	"move_left": {"type": "key", "code": KEY_A},
 	"move_right": {"type": "key", "code": KEY_D},
 	"jump": {"type": "key", "code": KEY_SPACE},
+	"sneak": {"type": "key", "code": KEY_SHIFT},
 	"inventory": {"type": "key", "code": KEY_E},
 	"chat": {"type": "key", "code": KEY_T},
 	"toggle_walk_mode": {"type": "key", "code": KEY_R},
+	"toggle_camera": {"type": "key", "code": KEY_F5},
+	"drop_selected": {"type": "key", "code": KEY_Q},
 	"attack": {"type": "mouse", "button": MouseButton.MOUSE_BUTTON_LEFT},
 	"use": {"type": "mouse", "button": MouseButton.MOUSE_BUTTON_RIGHT},
 	"ui_cancel": {"type": "key", "code": KEY_ESCAPE}
@@ -44,6 +47,7 @@ var is_session_active: bool = false
 var day_duration_sec: float = 15.0 * 60.0
 var night_duration_sec: float = 20.0 * 60.0
 var _time_of_day_sec: float = 0.0
+var _day_count: int = 0
 
 var world_environment: WorldEnvironment
 var environment_resource: Environment
@@ -52,7 +56,9 @@ var moon_light: DirectionalLight3D
 var sky_anchor: Node3D
 var sun_sprite: Sprite3D
 var moon_sprite: Sprite3D
+var moon_phase_textures: Array[Texture2D] = []
 var keep_inventory_enabled: bool = false
+var game_mode: String = "survival"
 var _recipe_cache: Array[Dictionary] = []
 
 func _enter_tree() -> void:
@@ -389,9 +395,12 @@ func get_bindable_actions() -> Array[Dictionary]:
 		{"action": "move_left", "label": "Move Left"},
 		{"action": "move_right", "label": "Move Right"},
 		{"action": "jump", "label": "Jump"},
+		{"action": "sneak", "label": "Sneak / Descend"},
 		{"action": "inventory", "label": "Inventory"},
 		{"action": "chat", "label": "Chat"},
 		{"action": "toggle_walk_mode", "label": "Cycle Walk Mode"},
+		{"action": "toggle_camera", "label": "Toggle Camera"},
+		{"action": "drop_selected", "label": "Drop Selected Item"},
 		{"action": "attack", "label": "Attack / Break"},
 		{"action": "use", "label": "Use / Place"}
 	]
@@ -534,10 +543,77 @@ func _run_command(raw: String) -> void:
 				_post_system("Count must be a whole number.")
 				return
 			count = maxi(1, int(count_str))
-		var remaining: int = player.inventory.add_item(sid, count, block_registry.get_stack_size(sid))
-		player.emit_signal("inventory_changed")
+		give_item_to_player(sid, count)
 		var def_give: KZ_BlockRegistry.BlockDef = block_registry.get_def_by_runtime(rid)
-		_post_system("Gave %d x %s (#%d)." % [count - remaining, def_give.name if def_give != null else sid, rid])
+		_post_system("Gave %d x %s (#%d)." % [count, def_give.name if def_give != null else sid, rid])
+		return
+	if cmd == "clear":
+		if player == null:
+			return
+		player.inventory.clear_all()
+		player.cursor_item_id = ""
+		player.cursor_count = 0
+		player.emit_signal("inventory_changed")
+		_post_system("Inventory cleared.")
+		return
+	if cmd == "body":
+		if player == null:
+			return
+		if parts.size() < 2:
+			_post_system("Usage: /body sex male|female, /body build base|slim|shredded|fat, /body size <height> <width> <weight>")
+			return
+		var body_sub: String = parts[1].to_lower()
+		if body_sub == "sex":
+			if parts.size() < 3:
+				_post_system("Usage: /body sex male|female")
+				return
+			var sex_value: String = parts[2].to_lower()
+			if sex_value != "male" and sex_value != "female":
+				_post_system("Usage: /body sex male|female")
+				return
+			player.set_body_sex(sex_value)
+			_post_system("Body sex set to %s." % sex_value)
+			return
+		if body_sub == "build":
+			if parts.size() < 3:
+				_post_system("Usage: /body build base|slim|shredded|fat")
+				return
+			var build_value: String = parts[2].to_lower()
+			if build_value != "base" and build_value != "slim" and build_value != "shredded" and build_value != "fat":
+				_post_system("Usage: /body build base|slim|shredded|fat")
+				return
+			player.set_body_build(build_value)
+			_post_system("Body build set to %s." % build_value)
+			return
+		if body_sub == "size":
+			if parts.size() < 5:
+				_post_system("Usage: /body size <height_scale> <width_scale> <weight>")
+				return
+			var h_text: String = parts[2]
+			var w_text: String = parts[3]
+			var wt_text: String = parts[4]
+			if (not h_text.is_valid_float() and not h_text.is_valid_int()) or (not w_text.is_valid_float() and not w_text.is_valid_int()) or (not wt_text.is_valid_float() and not wt_text.is_valid_int()):
+				_post_system("Usage: /body size <height_scale> <width_scale> <weight>")
+				return
+			player.set_body_size(float(h_text), float(w_text), float(wt_text))
+			_post_system("Body size updated.")
+			return
+		_post_system("Usage: /body sex male|female, /body build base|slim|shredded|fat, /body size <height> <width> <weight>")
+		return
+	if cmd == "gamemode" or cmd == "gm":
+		if parts.size() < 2:
+			_post_system("Usage: /gamemode survival|creative")
+			return
+		var mode_token: String = parts[1].to_lower()
+		if mode_token == "s" or mode_token == "0":
+			mode_token = "survival"
+		elif mode_token == "c" or mode_token == "1":
+			mode_token = "creative"
+		if mode_token != "survival" and mode_token != "creative":
+			_post_system("Usage: /gamemode survival|creative")
+			return
+		set_game_mode(mode_token)
+		_post_system("Game mode set to %s." % mode_token)
 		return
 
 	_post_system("Unknown command: /%s" % cmd)
@@ -581,7 +657,7 @@ func get_time_display_info() -> Dictionary:
 	return {"label": night_label, "elapsed_minutes": night_elapsed / 60.0, "total_minutes": night_duration_sec / 60.0, "is_day": false}
 
 func _show_help() -> void:
-	_post_system("Commands: /help, /damage <amount>, /give <id|numeric_id> [count], /time set morning|day|noon|afternoon|evening|night|midnight, /keepinventory true|false, /gamerule keepInventory true|false")
+	_post_system("Commands: /help, /damage <amount>, /give <id|numeric_id> [count], /clear, /time set morning|day|noon|afternoon|evening|night|midnight, /keepinventory true|false, /gamerule keepInventory true|false, /gamemode survival|creative, /body sex male|female, /body build base|slim|shredded|fat, /body size <height> <width> <weight>")
 
 func _post_system(text: String) -> void:
 	if chat_bus != null:
@@ -660,8 +736,14 @@ func _setup_world_visuals(scene: Node) -> void:
 	sun_sprite.shaded = false
 	sky_anchor.add_child(sun_sprite)
 
+	moon_phase_textures.clear()
+	for phase_i in range(8):
+		var phase_path: String = "res://assets/textures/sky/moon_phase_%d.png" % phase_i
+		var phase_tex: Texture2D = load(phase_path) as Texture2D
+		if phase_tex != null:
+			moon_phase_textures.append(phase_tex)
 	moon_sprite = Sprite3D.new()
-	moon_sprite.texture = load("res://assets/textures/sky/moon.png") as Texture2D
+	moon_sprite.texture = moon_phase_textures[0] if moon_phase_textures.size() > 0 else (load("res://assets/textures/sky/moon.png") as Texture2D)
 	moon_sprite.pixel_size = 0.26
 	moon_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	moon_sprite.shaded = false
@@ -682,9 +764,12 @@ func _update_day_night(dt: float) -> void:
 	var total_cycle: float = day_duration_sec + night_duration_sec
 	if total_cycle <= 0.0:
 		return
+	var prev_time: float = _time_of_day_sec
 	_time_of_day_sec = fmod(_time_of_day_sec + dt, total_cycle)
 	if _time_of_day_sec < 0.0:
 		_time_of_day_sec += total_cycle
+	if dt > 0.0 and _time_of_day_sec < prev_time:
+		_day_count += 1
 
 	var sunrise: float = night_duration_sec * 0.5
 	var sunset: float = sunrise + day_duration_sec
@@ -757,6 +842,9 @@ func _update_day_night(dt: float) -> void:
 
 	_update_celestial_sprite(sun_sprite, sun_dir, 180.0, Color(1, 1, 1, clampf(sun_strength * 1.10, 0.0, 1.0)))
 	_update_celestial_sprite(moon_sprite, moon_dir, 180.0, Color(1, 1, 1, clampf(moon_strength * 1.18, 0.0, 1.0)))
+	if moon_sprite != null and moon_phase_textures.size() > 0:
+		var phase_index: int = _day_count % moon_phase_textures.size()
+		moon_sprite.texture = moon_phase_textures[phase_index]
 	if sun_sprite != null:
 		sun_sprite.visible = sun_strength > 0.01
 	if moon_sprite != null:
@@ -784,7 +872,9 @@ func _save_player_state() -> void:
 
 func _load_world_state() -> void:
 	_time_of_day_sec = night_duration_sec * 0.5 + day_duration_sec * 0.12
+	_day_count = 0
 	keep_inventory_enabled = false
+	game_mode = "survival"
 	var path: String = _worldstate_path()
 	if not KZ_PathUtil.file_exists(path):
 		return
@@ -794,12 +884,18 @@ func _load_world_state() -> void:
 		return
 	var parsed: Dictionary = parsed_v as Dictionary
 	_time_of_day_sec = float(parsed.get("time_of_day_sec", _time_of_day_sec))
+	_day_count = int(parsed.get("day_count", _day_count))
 	keep_inventory_enabled = bool(parsed.get("keep_inventory", keep_inventory_enabled))
+	game_mode = str(parsed.get("game_mode", game_mode)).to_lower()
+	if game_mode != "creative":
+		game_mode = "survival"
 
 func _save_world_state() -> void:
 	var data: Dictionary = {
 		"time_of_day_sec": _time_of_day_sec,
-		"keep_inventory": keep_inventory_enabled
+		"day_count": _day_count,
+		"keep_inventory": keep_inventory_enabled,
+		"game_mode": game_mode
 	}
 	KZ_PathUtil.write_text(_worldstate_path(), JSON.stringify(data, "\t"))
 	if server != null:
@@ -895,6 +991,32 @@ func spawn_dropped_item(item_id: String, count: int, world_pos: Vector3) -> void
 	scene.add_child(drop)
 	drop.global_position = world_pos
 	drop.setup(item_id, count, def.tint if def != null else Color(1, 1, 1, 1))
+
+
+func give_item_to_player(item_id: String, count: int) -> int:
+	if player == null or block_registry == null or item_id == "" or count <= 0:
+		return 0
+	var remaining: int = player.inventory.add_item(item_id, count, block_registry.get_stack_size(item_id))
+	player.emit_signal("inventory_changed")
+	return count - remaining
+
+func get_game_mode() -> String:
+	return game_mode
+
+func is_creative_mode() -> bool:
+	return game_mode == "creative"
+
+func is_survival_mode() -> bool:
+	return game_mode != "creative"
+
+func set_game_mode(mode: String) -> void:
+	game_mode = mode.to_lower()
+	if game_mode != "creative":
+		game_mode = "survival"
+	if is_session_active:
+		_save_world_state()
+	if player != null:
+		player.emit_signal("inventory_changed")
 
 func resolve_item_token(token: String) -> Dictionary:
 	if block_registry == null:

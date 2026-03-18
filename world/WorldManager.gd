@@ -14,13 +14,14 @@ var _chunks: Dictionary = {}
 var _requested: Dictionary = {}
 var _retry_after_ms: Dictionary = {}
 
-var request_budget_per_frame: int = 6
-var initial_burst_target_loaded: int = 20
-var initial_burst_budget_per_frame: int = 10
+var request_budget_per_frame: int = 2
+var initial_burst_target_loaded: int = 8
+var initial_burst_budget_per_frame: int = 3
 
 var debug_wireframe: bool = false
 var _terrain_mat: Material
 var _flora_mat: Material
+var _water_mat: Material
 var _day_night_tint: Color = Color(1, 1, 1, 1)
 var _sun_dir: Vector3 = Vector3(0.2, 1.0, -0.3).normalized()
 var _moon_dir: Vector3 = Vector3(-0.2, -1.0, 0.3).normalized()
@@ -54,11 +55,12 @@ func setup(p_server, p_worldgen_cfg: Dictionary) -> void:
 func _build_chunk_materials() -> void:
 	_terrain_mat = _build_shader_material("res://assets/shaders/terrain_grass.gdshader")
 	_flora_mat = _build_shader_material("res://assets/shaders/terrain_flora.gdshader")
+	_water_mat = _build_shader_material("res://assets/shaders/terrain_water.gdshader")
 
 	if _terrain_mat == null:
 		var terrain_fallback := StandardMaterial3D.new()
 		terrain_fallback.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		terrain_fallback.cull_mode = BaseMaterial3D.CULL_BACK
+		terrain_fallback.cull_mode = BaseMaterial3D.CULL_DISABLED
 		terrain_fallback.albedo_color = Color(1, 1, 1, 1)
 		terrain_fallback.vertex_color_use_as_albedo = true
 		terrain_fallback.texture_repeat = true
@@ -68,12 +70,22 @@ func _build_chunk_materials() -> void:
 	if _flora_mat == null:
 		var flora_fallback := StandardMaterial3D.new()
 		flora_fallback.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		flora_fallback.cull_mode = BaseMaterial3D.CULL_BACK
+		flora_fallback.cull_mode = BaseMaterial3D.CULL_DISABLED
 		flora_fallback.albedo_color = Color(1, 1, 1, 1)
 		flora_fallback.vertex_color_use_as_albedo = true
 		flora_fallback.texture_repeat = true
 		flora_fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
 		_flora_mat = flora_fallback
+
+	if _water_mat == null:
+		var water_fallback := StandardMaterial3D.new()
+		water_fallback.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		water_fallback.cull_mode = BaseMaterial3D.CULL_DISABLED
+		water_fallback.albedo_color = Color(0.36, 0.62, 0.95, 0.72)
+		water_fallback.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		water_fallback.texture_repeat = true
+		water_fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
+		_water_mat = water_fallback
 
 func _build_shader_material(shader_path: String) -> Material:
 	var shader_res: Shader = load(shader_path) as Shader
@@ -82,7 +94,7 @@ func _build_shader_material(shader_path: String) -> Material:
 
 	var mat := ShaderMaterial.new()
 	mat.shader = shader_res
-	mat.set_shader_parameter("grass_side_tex", _load_tex("res://assets/textures/blocks/grass.png"))
+	mat.set_shader_parameter("grass_side_tex", _load_tex("res://assets/textures/blocks/grass_side.png"))
 	mat.set_shader_parameter("grass_top_tex", _load_tex("res://assets/textures/blocks/grass_top.png"))
 	mat.set_shader_parameter("dirt_tex", _load_tex("res://assets/textures/blocks/dirt.png"))
 	mat.set_shader_parameter("log_side_tex", _load_tex("res://assets/textures/blocks/oak_log.png"))
@@ -91,6 +103,9 @@ func _build_shader_material(shader_path: String) -> Material:
 	mat.set_shader_parameter("oak_planks_tex", _load_tex("res://assets/textures/blocks/oak_planks.png"))
 	mat.set_shader_parameter("crafting_table_side_tex", _load_tex("res://assets/textures/blocks/crafting_table_side.png"))
 	mat.set_shader_parameter("crafting_table_top_tex", _load_tex("res://assets/textures/blocks/crafting_table_top.png"))
+	mat.set_shader_parameter("water_tex", _load_tex("res://assets/textures/blocks/water.png"))
+	mat.set_shader_parameter("sand_tex", _load_tex("res://assets/textures/blocks/sand.png"))
+	mat.set_shader_parameter("stone_tex", _load_tex("res://assets/textures/blocks/stone.png"))
 	mat.set_shader_parameter("day_night_tint", Vector3(_day_night_tint.r, _day_night_tint.g, _day_night_tint.b))
 	mat.set_shader_parameter("sun_dir", _sun_dir)
 	mat.set_shader_parameter("moon_dir", _moon_dir)
@@ -109,6 +124,7 @@ func set_day_night_tint(tint: Color) -> void:
 	_day_night_tint = tint
 	_apply_material_tint(_terrain_mat, tint)
 	_apply_material_tint(_flora_mat, tint)
+	_apply_material_tint(_water_mat, tint)
 
 func _apply_material_tint(mat: Material, tint: Color) -> void:
 	if mat == null:
@@ -132,6 +148,7 @@ func set_celestial_lighting(sun_dir: Vector3, moon_dir: Vector3, sun_strength: f
 	_ambient_tint = ambient
 	_apply_material_tint(_terrain_mat, _day_night_tint)
 	_apply_material_tint(_flora_mat, _day_night_tint)
+	_apply_material_tint(_water_mat, _day_night_tint)
 
 func set_view_distance(chunks: int) -> void:
 	view_distance = clampi(chunks, 2, 16)
@@ -275,11 +292,11 @@ func _make_mesh(arrays: Dictionary) -> ArrayMesh:
 	var normals: PackedVector3Array = arrays.get("normals", PackedVector3Array()) as PackedVector3Array
 	var uvs: PackedVector2Array = arrays.get("uvs", PackedVector2Array()) as PackedVector2Array
 	var colors: PackedColorArray = arrays.get("colors", PackedColorArray()) as PackedColorArray
-
 	var src_indices: PackedInt32Array = arrays.get("indices", PackedInt32Array()) as PackedInt32Array
 
-	var terrain := _split_surface_arrays(verts, normals, uvs, colors, src_indices, false)
-	var flora := _split_surface_arrays(verts, normals, uvs, colors, src_indices, true)
+	var terrain := _split_surface_arrays(verts, normals, uvs, colors, src_indices, 0)
+	var flora := _split_surface_arrays(verts, normals, uvs, colors, src_indices, 1)
+	var water := _split_surface_arrays(verts, normals, uvs, colors, src_indices, 2)
 
 	if not (terrain[Mesh.ARRAY_VERTEX] as PackedVector3Array).is_empty():
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, terrain)
@@ -289,7 +306,18 @@ func _make_mesh(arrays: Dictionary) -> ArrayMesh:
 		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, flora)
 		mesh.surface_set_material(mesh.get_surface_count() - 1, _flora_mat)
 
+	if not (water[Mesh.ARRAY_VERTEX] as PackedVector3Array).is_empty():
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, water)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, _water_mat)
+
 	return mesh
+
+func _surface_kind_for_face_id(face_id: int) -> int:
+	if face_id == 5:
+		return 1
+	if face_id == 9:
+		return 2
+	return 0
 
 func _split_surface_arrays(
 	verts: PackedVector3Array,
@@ -297,7 +325,7 @@ func _split_surface_arrays(
 	uvs: PackedVector2Array,
 	colors: PackedColorArray,
 	src_indices: PackedInt32Array,
-	flora_only: bool
+	surface_kind: int
 ) -> Array:
 	var out_verts := PackedVector3Array()
 	var out_normals := PackedVector3Array()
@@ -311,10 +339,7 @@ func _split_surface_arrays(
 		if src_i >= colors.size():
 			break
 		var face_id: int = int(round(colors[src_i].r * 255.0))
-		# Only leaves should use the flora surface/material.
-		# Logs belong on the solid terrain surface so they render like full blocks.
-		var is_flora: bool = face_id == 5
-		if is_flora != flora_only:
+		if _surface_kind_for_face_id(face_id) != surface_kind:
 			continue
 
 		var base: int = out_verts.size()
@@ -329,9 +354,9 @@ func _split_surface_arrays(
 				out_colors.append(colors[si])
 
 		var src_index_base: int = q * 6
-		if src_indices.size() >= src_index_base + 6:
-			for kk in range(6):
-				out_indices.append(base + int(src_indices[src_index_base + kk]) - src_i)
+		if src_index_base + 5 < src_indices.size():
+			for ik in range(6):
+				out_indices.append(base + (src_indices[src_index_base + ik] - src_i))
 		else:
 			out_indices.append(base)
 			out_indices.append(base + 1)

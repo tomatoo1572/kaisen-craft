@@ -1,6 +1,9 @@
 extends CharacterBody3D
 class_name KZ_Player
 
+const PLAYER_MODEL_SCRIPT_PATH := "res://player/PlayerModel.gd"
+const CHARACTER_APPEARANCE_SCRIPT_PATH := "res://player/CharacterAppearance.gd"
+
 signal inventory_changed
 signal inventory_opened(open: bool)
 signal hotbar_selected_changed(index: int)
@@ -11,25 +14,38 @@ signal hunger_changed(current: float, max_value: float)
 signal thirst_changed(current: float, max_value: float)
 signal auto_step_changed(enabled: bool)
 signal walk_mode_changed(mode_name: String)
+signal camera_mode_changed(mode_name: String)
+signal flight_changed(enabled: bool)
 signal died
 signal crafting_table_opened(open: bool)
+signal appearance_changed(profile: Dictionary)
 
 var walk_speed: float = 4.8
 var jog_speed: float = 7.8
 var run_speed: float = 12.4
 var walk_mode_index: int = 1
-var jump_velocity: float = 6.85
-var gravity: float = 42.0
+var jump_velocity: float = 7.15
+var gravity: float = 44.0
 var mouse_sensitivity: float = 0.12
 var camera_fov: float = 75.0
 
 var cam: Camera3D
+var visual_root: Node3D
+var player_model: Node3D
+var appearance_profile: RefCounted
 var pitch: float = 0.0
+var camera_mode: int = 0
+var creative_flight_enabled: bool = false
+var _last_jump_tap_ms: int = -1000
+var third_person_freelook_yaw: float = 0.0
+var third_person_freelook_pitch: float = 0.0
+var third_person_freelook_return_speed: float = 9.0
+var first_person_body_visible: bool = true
 
 # Voxel collision sampling
 var body_radius: float = 0.27
 var floor_probe_radius: float = 0.20
-var step_height: float = 1.02
+var step_height: float = 1.08
 var auto_step_enabled: bool = false
 
 # Ground snapping
@@ -83,17 +99,44 @@ func _init() -> void:
 	col.position = Vector3(0, 0.90, 0)
 	add_child(col)
 
+	visual_root = Node3D.new()
+	visual_root.name = "VisualRoot"
+	add_child(visual_root)
+
+	var appearance_script: Script = load(CHARACTER_APPEARANCE_SCRIPT_PATH) as Script
+	if appearance_script != null:
+		appearance_profile = appearance_script.new()
+
+	var player_model_script: Script = load(PLAYER_MODEL_SCRIPT_PATH) as Script
+	if player_model_script != null:
+		player_model = player_model_script.new()
+		if player_model != null:
+			visual_root.add_child(player_model)
+			if appearance_profile != null and player_model.has_method("set_appearance_profile"):
+				player_model.call("set_appearance_profile", appearance_profile)
+
 	cam = Camera3D.new()
-	cam.position = Vector3(0, 1.62, 0)
 	cam.fov = camera_fov
 	add_child(cam)
+	third_person_freelook_pitch = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+	_apply_camera_mode()
 
 func _ready() -> void:
+	if player_model != null:
+		if player_model.has_method("ensure_model_loaded"):
+			player_model.call("ensure_model_loaded")
+		if player_model.has_method("apply_profile"):
+			player_model.call("apply_profile")
+		if player_model.has_method("set_look_pitch"):
+			player_model.call("set_look_pitch", pitch)
 	if not _is_ui_open():
 		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED as Input.MouseMode)
 	_emit_survival_signals()
 	emit_signal("auto_step_changed", auto_step_enabled)
 	emit_signal("walk_mode_changed", get_walk_mode_name())
+	emit_signal("camera_mode_changed", get_camera_mode_name())
+	emit_signal("flight_changed", creative_flight_enabled)
+	emit_signal("appearance_changed", get_character_appearance())
 
 func apply_settings(gameplay_cfg: Dictionary) -> void:
 	var p: Dictionary = {}
@@ -111,8 +154,8 @@ func apply_settings(gameplay_cfg: Dictionary) -> void:
 		jog_speed = walk_speed + 1.8
 	if run_speed < jog_speed + 3.0:
 		run_speed = jog_speed + 2.6
-	jump_velocity = clampf(float(p.get("jump_velocity", p.get("player_jump_velocity", jump_velocity))), 6.5, 7.2)
-	gravity = maxf(40.0, float(p.get("gravity", gravity)))
+	jump_velocity = clampf(float(p.get("jump_velocity", p.get("player_jump_velocity", jump_velocity))), 6.8, 7.6)
+	gravity = maxf(42.0, float(p.get("gravity", gravity)))
 	camera_fov = clampf(float(p.get("fov", p.get("camera_fov", p.get("player_fov", camera_fov)))), 20.0, 120.0)
 	if cam != null:
 		cam.fov = camera_fov
@@ -121,7 +164,7 @@ func apply_settings(gameplay_cfg: Dictionary) -> void:
 		mouse_sensitivity *= 100.0
 	reach_distance = float(p.get("reach_distance", p.get("break_range", reach_distance)))
 	auto_step_enabled = bool(p.get("auto_step_enabled", auto_step_enabled))
-	step_height = clampf(float(p.get("step_height", step_height)), 0.60, 1.08)
+	step_height = clampf(float(p.get("step_height", step_height)), 0.72, 1.12)
 	max_health = float(p.get("max_health", max_health))
 	health = clampf(float(p.get("starting_health", max_health)), 0.0, max_health)
 	max_hunger = float(p.get("max_hunger", max_hunger))
@@ -133,6 +176,8 @@ func apply_settings(gameplay_cfg: Dictionary) -> void:
 	_emit_survival_signals()
 	emit_signal("auto_step_changed", auto_step_enabled)
 	emit_signal("walk_mode_changed", get_walk_mode_name())
+	emit_signal("camera_mode_changed", get_camera_mode_name())
+	emit_signal("flight_changed", creative_flight_enabled)
 
 func _emit_survival_signals() -> void:
 	emit_signal("health_changed", health, max_health)
@@ -151,6 +196,102 @@ func set_camera_fov(value: float) -> void:
 
 func get_camera_fov() -> float:
 	return camera_fov
+
+func get_character_appearance() -> Dictionary:
+	if appearance_profile != null and appearance_profile.has_method("to_dict"):
+		return appearance_profile.call("to_dict") as Dictionary
+	return {
+		"sex": "male",
+		"build": "base",
+		"face_preset": "default",
+		"skin_tone": [1.0, 1.0, 1.0, 1.0],
+		"height_scale": 1.0,
+		"width_scale": 1.0,
+		"body_weight": 0.0,
+		"body_preset": "male_base_01",
+		"clothing": {}
+	}
+
+func apply_character_appearance(data: Dictionary) -> void:
+	if appearance_profile == null:
+		var appearance_script: Script = load(CHARACTER_APPEARANCE_SCRIPT_PATH) as Script
+		if appearance_script != null:
+			appearance_profile = appearance_script.new()
+	if appearance_profile != null and appearance_profile.has_method("apply_dict"):
+		appearance_profile.call("apply_dict", data)
+	if player_model != null:
+		if player_model.has_method("set_appearance_profile"):
+			player_model.call("set_appearance_profile", appearance_profile)
+		elif player_model.has_method("apply_profile"):
+			player_model.call("apply_profile")
+	emit_signal("appearance_changed", get_character_appearance())
+	_apply_camera_mode()
+
+func set_body_sex(sex: String) -> void:
+	var profile: Dictionary = get_character_appearance()
+	profile["sex"] = sex.to_lower()
+	apply_character_appearance(profile)
+
+func set_body_build(build: String) -> void:
+	var profile: Dictionary = get_character_appearance()
+	profile["build"] = build.to_lower()
+	apply_character_appearance(profile)
+
+func set_body_size(height_scale_value: float, width_scale_value: float, body_weight_value: float) -> void:
+	var profile: Dictionary = get_character_appearance()
+	profile["height_scale"] = height_scale_value
+	profile["width_scale"] = width_scale_value
+	profile["body_weight"] = body_weight_value
+	apply_character_appearance(profile)
+
+func _is_third_person_freelook_active() -> bool:
+	return camera_mode == 1 and not _is_ui_open() and Input.is_key_pressed(KEY_ALT)
+
+func get_camera_mode_name() -> String:
+	return "First Person" if camera_mode == 0 else "Third Person"
+
+func toggle_camera_mode() -> void:
+	camera_mode = (camera_mode + 1) % 2
+	if camera_mode != 1:
+		third_person_freelook_yaw = 0.0
+		third_person_freelook_pitch = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+	_apply_camera_mode()
+	emit_signal("camera_mode_changed", get_camera_mode_name())
+
+func _apply_camera_mode() -> void:
+	if cam == null:
+		return
+	if camera_mode == 0:
+		cam.position = Vector3(0.0, 1.56, 0.06)
+		cam.rotation = Vector3(pitch, 0.0, 0.0)
+	else:
+		var target_local: Vector3 = Vector3(0.0, 1.42, 0.0)
+		var orbit_yaw: float = third_person_freelook_yaw
+		var orbit_pitch: float = third_person_freelook_pitch
+		if not _is_third_person_freelook_active():
+			orbit_yaw = 0.0
+			orbit_pitch = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+		var dist: float = 2.15
+		var horiz: float = cos(orbit_pitch) * dist
+		var orbit: Vector3 = Vector3(sin(orbit_yaw) * horiz, sin(orbit_pitch) * dist, cos(orbit_yaw) * horiz)
+		var shoulder: Vector3 = Basis(Vector3.UP, orbit_yaw) * Vector3(0.48, 0.0, 0.0)
+		cam.position = target_local + orbit + shoulder
+		cam.look_at(to_global(target_local), Vector3.UP)
+	if player_model != null:
+		if player_model.has_method("set_first_person_body_visible"):
+			player_model.call("set_first_person_body_visible", first_person_body_visible)
+		if player_model.has_method("set_first_person_hidden"):
+			player_model.call("set_first_person_hidden", camera_mode == 0)
+		if player_model.has_method("set_look_pitch"):
+			player_model.call("set_look_pitch", pitch)
+
+func is_in_creative_flight() -> bool:
+	return creative_flight_enabled
+
+func _set_creative_flight_enabled(enabled: bool) -> void:
+	creative_flight_enabled = enabled
+	_vel_y = 0.0
+	emit_signal("flight_changed", creative_flight_enabled)
 
 func get_walk_mode_name() -> String:
 	match walk_mode_index:
@@ -240,10 +381,13 @@ func serialize_state() -> Dictionary:
 		"position": [global_position.x, global_position.y, global_position.z],
 		"pitch": pitch,
 		"yaw": rotation.y,
+		"appearance": get_character_appearance(),
 		"health": health,
 		"hunger": hunger,
 		"thirst": thirst,
 		"walk_mode_index": walk_mode_index,
+		"camera_mode": camera_mode,
+		"creative_flight_enabled": creative_flight_enabled,
 		"selected_index": inventory.selected_index,
 		"hotbar_ids": inventory.hotbar_ids.duplicate(),
 		"hotbar_counts": inventory.hotbar_counts.duplicate(),
@@ -258,7 +402,9 @@ func load_state(data: Dictionary) -> void:
 			global_position = Vector3(float(arr[0]), float(arr[1]), float(arr[2]))
 	pitch = float(data.get("pitch", pitch))
 	rotation.y = float(data.get("yaw", rotation.y))
-	cam.rotation.x = pitch
+	if data.has("appearance") and data["appearance"] is Dictionary:
+		apply_character_appearance(data["appearance"] as Dictionary)
+	_apply_camera_mode()
 	if data.has("hotbar_ids") and data["hotbar_ids"] is Array:
 		var src_ids: Array = data["hotbar_ids"] as Array
 		for i in range(min(src_ids.size(), inventory.hotbar_ids.size())):
@@ -283,6 +429,9 @@ func load_state(data: Dictionary) -> void:
 	set_hunger(float(data.get("hunger", hunger)))
 	set_thirst(float(data.get("thirst", thirst)))
 	walk_mode_index = clampi(int(data.get("walk_mode_index", walk_mode_index)), 0, 2)
+	camera_mode = clampi(int(data.get("camera_mode", camera_mode)), 0, 1)
+	creative_flight_enabled = bool(data.get("creative_flight_enabled", creative_flight_enabled))
+	_apply_camera_mode()
 	emit_signal("inventory_changed")
 	emit_signal("walk_mode_changed", get_walk_mode_name())
 	emit_signal("hotbar_selected_changed", inventory.selected_index)
@@ -391,6 +540,25 @@ func _unhandled_input(event: InputEvent) -> void:
 				cycle_walk_mode()
 			return
 
+		if event.is_action_pressed("toggle_camera"):
+			if not _is_ui_open():
+				toggle_camera_mode()
+			return
+
+		if event.is_action_pressed("jump"):
+			var game_node_jump: Node = get_node_or_null("/root/Game")
+			var creative_mode_jump: bool = game_node_jump != null and game_node_jump.has_method("is_creative_mode") and bool(game_node_jump.call("is_creative_mode"))
+			if creative_mode_jump and not _is_ui_open():
+				var now_ms: int = Time.get_ticks_msec()
+				if now_ms - _last_jump_tap_ms <= 280:
+					_set_creative_flight_enabled(not creative_flight_enabled)
+				_last_jump_tap_ms = now_ms
+
+		if event.is_action_pressed("drop_selected"):
+			if not _is_ui_open():
+				_drop_selected_item(1)
+			return
+
 		if event.is_action_pressed("ui_cancel"):
 			if inventory_is_open:
 				_set_inventory_open(false)
@@ -416,9 +584,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion:
 		if (not _is_ui_open()) and Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED:
 			var mm: InputEventMouseMotion = event as InputEventMouseMotion
-			rotate_y(-mm.relative.x * mouse_sensitivity * 0.01)
-			pitch = clamp(pitch - mm.relative.y * mouse_sensitivity * 0.01, deg_to_rad(-89), deg_to_rad(89))
-			cam.rotation.x = pitch
+			if _is_third_person_freelook_active():
+				third_person_freelook_yaw = wrapf(third_person_freelook_yaw - mm.relative.x * mouse_sensitivity * 0.01, -PI, PI)
+				third_person_freelook_pitch = clampf(third_person_freelook_pitch - mm.relative.y * mouse_sensitivity * 0.01, deg_to_rad(-50.0), deg_to_rad(60.0))
+			else:
+				rotate_y(-mm.relative.x * mouse_sensitivity * 0.01)
+				pitch = clampf(pitch - mm.relative.y * mouse_sensitivity * 0.01, deg_to_rad(-89.0), deg_to_rad(89.0))
+			_apply_camera_mode()
 		return
 
 	if event is InputEventMouseButton and not event.pressed and not event.is_echo():
@@ -464,6 +636,15 @@ func _physics_process(dt: float) -> void:
 	_update_survival(dt)
 	_update_block_breaking(dt)
 	_jump_assist_timer = maxf(0.0, _jump_assist_timer - dt)
+	if camera_mode == 1 and not _is_third_person_freelook_active():
+		third_person_freelook_yaw = lerpf(third_person_freelook_yaw, 0.0, min(1.0, dt * third_person_freelook_return_speed))
+		var target_pitch: float = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+		third_person_freelook_pitch = lerpf(third_person_freelook_pitch, target_pitch, min(1.0, dt * third_person_freelook_return_speed))
+
+	var game_node_mode: Node = get_node_or_null("/root/Game")
+	var creative_mode: bool = game_node_mode != null and game_node_mode.has_method("is_creative_mode") and bool(game_node_mode.call("is_creative_mode"))
+	if not creative_mode and creative_flight_enabled:
+		_set_creative_flight_enabled(false)
 
 	var pos: Vector3 = global_position
 	var prev_pos: Vector3 = pos
@@ -484,8 +665,25 @@ func _physics_process(dt: float) -> void:
 
 	input_dir.y = 0.0
 	input_dir = input_dir.normalized()
-	var move_speed: float = get_current_move_speed()
+	var in_water: bool = _is_in_water(srv, pos)
+	var move_speed: float = get_current_move_speed() * (0.58 if in_water else 1.0)
 	var move_h: Vector3 = input_dir * move_speed * dt
+
+	if creative_mode and creative_flight_enabled and not _is_ui_open():
+		pos = _move_with_voxel_collision(srv, pos, move_h)
+		var fly_up: float = 0.0
+		if Input.is_action_pressed("jump"):
+			fly_up += run_speed * dt
+		if Input.is_action_pressed("sneak"):
+			fly_up -= run_speed * dt
+		if absf(fly_up) > 0.0:
+			var fly_pos: Vector3 = pos + Vector3(0.0, fly_up, 0.0)
+			if not _collides_at(srv, fly_pos):
+				pos = fly_pos
+		global_position = pos
+		_is_grounded = false
+		_vel_y = 0.0
+		return
 
 	var floor_y_before: float = _find_local_floor_y(srv, pos)
 	_is_grounded = false
@@ -502,10 +700,17 @@ func _physics_process(dt: float) -> void:
 	else:
 		_coyote_timer = maxf(0.0, _coyote_timer - dt)
 
-	if (not _is_ui_open()) and Input.is_action_just_pressed("jump"):
-		_jump_assist_timer = 0.28
+	if in_water:
+		if (not _is_ui_open()) and Input.is_action_pressed("jump"):
+			_vel_y = minf(_vel_y + 28.0 * dt, 5.0)
+		else:
+			_vel_y -= gravity * 0.16 * dt
+		_vel_y = clampf(_vel_y, -3.2, 5.0)
+		_vel_y *= 0.92
+	elif (not _is_ui_open()) and Input.is_action_just_pressed("jump"):
+		_jump_assist_timer = 0.32
 		if _is_grounded or _coyote_timer > 0.0:
-			_vel_y = jump_velocity
+			_vel_y = jump_velocity + 0.18
 			_is_grounded = false
 			_coyote_timer = 0.0
 	else:
@@ -531,6 +736,12 @@ func _physics_process(dt: float) -> void:
 	global_position = pos
 
 func _update_survival(dt: float) -> void:
+	var game_node: Node = get_node_or_null("/root/Game")
+	if game_node != null and game_node.has_method("is_creative_mode") and bool(game_node.call("is_creative_mode")):
+		set_hunger(max_hunger)
+		set_thirst(max_thirst)
+		_starve_timer = 0.0
+		return
 	_hunger_timer += dt
 	_thirst_timer += dt
 	if _hunger_timer >= hunger_drain_interval_sec:
@@ -548,6 +759,19 @@ func _update_survival(dt: float) -> void:
 		_starve_timer = 0.0
 
 func _move_with_voxel_collision(srv: Node, pos: Vector3, move_h: Vector3) -> Vector3:
+	if move_h == Vector3.ZERO:
+		return pos
+	var combined: Vector3 = pos + move_h
+	if not _collides_at(srv, combined):
+		return combined
+	if auto_step_enabled and (_is_grounded or _vel_y <= 0.1):
+		var stepped_combined: Vector3 = _try_auto_step(srv, pos, move_h)
+		if stepped_combined != pos:
+			return stepped_combined
+	elif _vel_y > 0.0 or _jump_assist_timer > 0.0:
+		var climbed_combined: Vector3 = _try_jump_climb(srv, pos, move_h)
+		if climbed_combined != pos:
+			return climbed_combined
 	if move_h.x != 0.0:
 		pos = _attempt_axis_move(srv, pos, Vector3(move_h.x, 0.0, 0.0), true)
 	if move_h.z != 0.0:
@@ -602,7 +826,7 @@ func _try_auto_step(srv: Node, pos: Vector3, delta: Vector3) -> Vector3:
 	if floor_y <= -999999.0:
 		return pos
 	var dy: float = floor_y - pos.y
-	if dy < -0.15 or dy > step_height + 0.18:
+	if dy < -0.18 or dy > step_height + 0.28:
 		return pos
 	var landed: Vector3 = Vector3(moved.x, floor_y, moved.z)
 	if _collides_at(srv, landed):
@@ -619,7 +843,7 @@ func _try_jump_climb(srv: Node, pos: Vector3, delta: Vector3) -> Vector3:
 			if not _collides_at(srv, landed_direct):
 				return landed_direct
 
-	var rises: Array[float] = [0.18, 0.36, 0.54, 0.72, 0.90, jump_climb_height]
+	var rises: Array[float] = [0.20, 0.40, 0.60, 0.80, 1.00, jump_climb_height]
 	for rise: float in rises:
 		var candidate: Vector3 = pos + Vector3(0.0, rise, 0.0) + delta
 		if _collides_at(srv, candidate):
@@ -689,6 +913,19 @@ func _find_local_floor_y(srv: Node, pos: Vector3) -> float:
 				break
 
 	return best
+
+func _is_in_water(srv: Node, pos: Vector3) -> bool:
+	if srv == null:
+		return false
+	var samples: Array[float] = [0.18, 0.92, 1.40]
+	for oy in samples:
+		var wx: int = int(floor(pos.x))
+		var wy: int = int(floor(pos.y + oy))
+		var wz: int = int(floor(pos.z))
+		var rid: int = srv.get_block_at_world(wx, wy, wz)
+		if rid != 0 and srv.registry != null and srv.registry.get_string_id(rid) == "kaizencraft:water":
+			return true
+	return false
 
 func _collides_at(srv: Node, pos: Vector3) -> bool:
 	var offsets: Array[Vector2] = [
@@ -770,6 +1007,9 @@ func _update_block_breaking(dt: float) -> void:
 			mining_progress_sec = minf(mining_progress_sec, break_time * 0.75)
 
 func _get_break_time_seconds(runtime_id: int) -> float:
+	var game_node: Node = get_node_or_null("/root/Game")
+	if game_node != null and game_node.has_method("is_creative_mode") and bool(game_node.call("is_creative_mode")):
+		return 0.01
 	var srv: Node = _get_server()
 	if srv == null or srv.registry == null:
 		return 0.35
@@ -834,8 +1074,28 @@ func _try_place_block() -> void:
 
 	var ok: bool = srv.place_block_world(t.x, t.y, t.z, rid)
 	if ok:
-		inventory.consume_selected(1)
+		var game_node3: Node = get_node_or_null("/root/Game")
+		var creative_mode: bool = game_node3 != null and game_node3.has_method("is_creative_mode") and bool(game_node3.call("is_creative_mode"))
+		if not creative_mode:
+			inventory.consume_selected(1)
 		emit_signal("inventory_changed")
+
+func _drop_selected_item(amount: int) -> void:
+	if inventory == null or not inventory.has_selected() or amount <= 0:
+		return
+	var selected_id: String = inventory.get_selected_id()
+	var selected_count: int = inventory.get_selected_count()
+	if selected_id == "" or selected_count <= 0:
+		return
+	var drop_count: int = mini(amount, selected_count)
+	var game_node: Node = get_node_or_null("/root/Game")
+	if game_node == null or not game_node.has_method("spawn_dropped_item"):
+		return
+	inventory.consume_selected(drop_count)
+	emit_signal("inventory_changed")
+	var forward: Vector3 = -global_transform.basis.z
+	var spawn_pos: Vector3 = cam.global_position + forward * 1.0 + Vector3(0.0, -0.25, 0.0)
+	game_node.call("spawn_dropped_item", selected_id, drop_count, spawn_pos)
 
 func _voxel_raycast(max_dist: float) -> Dictionary:
 	var srv: Node = _get_server()

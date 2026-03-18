@@ -5,6 +5,7 @@ const CRAFT2_BASE: int = 100
 const CRAFT2_RESULT: int = 104
 const CRAFT3_BASE: int = 200
 const CRAFT3_RESULT: int = 209
+const CREATIVE_BASE: int = 300
 
 var player: KZ_Player
 var registry: KZ_BlockRegistry
@@ -24,7 +25,23 @@ var save_return_button: Button
 var render_distance_spin: SpinBox
 var fov_spin: SpinBox
 var max_fps_spin: SpinBox
+var character_button: Button
+var character_panel: PanelContainer
+var character_preview_container: SubViewportContainer
+var character_preview_viewport: SubViewport
+var character_preview_root: Node3D
+var character_preview_camera: Camera3D
+var character_preview_model: Node3D
+var character_sex_option: OptionButton
+var character_build_option: OptionButton
+var character_height_slider: HSlider
+var character_width_slider: HSlider
+var character_weight_slider: HSlider
+var character_height_value_label: Label
+var character_width_value_label: Label
+var character_weight_value_label: Label
 var walk_mode_label: Label
+var camera_mode_label: Label
 var time_label: Label
 var fps_label: Label
 var crosshair: Label
@@ -42,6 +59,17 @@ var death_panel: PanelContainer
 var crafting_table_panel: PanelContainer
 var inventory_craft_row: HBoxContainer
 var inventory_craft_hint: Label
+var creative_panel: PanelContainer
+var creative_grid: GridContainer
+var creative_tabs: HBoxContainer
+var creative_prev_button: Button
+var creative_next_button: Button
+var creative_page_label: Label
+var creative_slots: Array[KZ_SlotButton] = []
+var creative_entries: Array[Dictionary] = []
+var creative_filtered_entries: Array[Dictionary] = []
+var creative_category: String = "Blocks"
+var creative_page: int = 0
 var craft2_slots: Array[KZ_SlotButton] = []
 var craft3_slots: Array[KZ_SlotButton] = []
 var craft2_result_slot: KZ_SlotButton
@@ -59,6 +87,8 @@ var craft3_consume_slots: Array[int] = []
 
 var hotbar_slots: Array[KZ_SlotButton] = []
 var inv_slots: Array[KZ_SlotButton] = []
+var inv_grid_spacer: Control
+var _texture_cache: Dictionary = {}
 
 var cursor_panel: PanelContainer
 var cursor_icon: ColorRect
@@ -91,6 +121,7 @@ func setup(p_player: KZ_Player, p_registry: KZ_BlockRegistry) -> void:
 	_connect_chat_bus()
 	_refresh_all()
 	_refresh_controls_ui()
+	_refresh_creative_catalog()
 	_set_inventory_open(false)
 	_set_settings_open(false)
 	_set_controls_open(false)
@@ -99,9 +130,12 @@ func setup(p_player: KZ_Player, p_registry: KZ_BlockRegistry) -> void:
 	_refresh_hunger(player.hunger, player.max_hunger)
 	_refresh_thirst(player.thirst, player.max_thirst)
 	_refresh_walk_mode(player.get_walk_mode_name())
+	_refresh_camera_mode(player.get_camera_mode_name())
 	_refresh_render_distance()
 	_refresh_fov()
 	_refresh_max_fps()
+	_refresh_character_controls_from_player()
+	_refresh_character_preview()
 	_last_chat_activity_ms = Time.get_ticks_msec()
 
 func _init_crafting_arrays() -> void:
@@ -375,6 +409,20 @@ func _build_ui() -> void:
 	fps_label.text = "FPS 0"
 	root.add_child(fps_label)
 
+	camera_mode_label = Label.new()
+	camera_mode_label.anchor_left = 1.0
+	camera_mode_label.anchor_right = 1.0
+	camera_mode_label.anchor_top = 1.0
+	camera_mode_label.anchor_bottom = 1.0
+	camera_mode_label.offset_left = -260
+	camera_mode_label.offset_right = -18
+	camera_mode_label.offset_top = -82
+	camera_mode_label.offset_bottom = -58
+	camera_mode_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	camera_mode_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	camera_mode_label.text = "First Person"
+	root.add_child(camera_mode_label)
+
 	walk_mode_label = Label.new()
 	walk_mode_label.anchor_left = 1.0
 	walk_mode_label.anchor_right = 1.0
@@ -418,8 +466,8 @@ func _build_ui() -> void:
 	inv_panel.anchor_bottom = 0.5
 	inv_panel.offset_left = -280
 	inv_panel.offset_right = 280
-	inv_panel.offset_top = -255
-	inv_panel.offset_bottom = 105
+	inv_panel.offset_top = -210
+	inv_panel.offset_bottom = 150
 	inv_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 	root.add_child(inv_panel)
 
@@ -475,6 +523,9 @@ func _build_ui() -> void:
 	craft_result_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	craft_result_title.visible = false
 	craft_result_box.add_child(craft_result_title)
+	var craft_result_spacer := Control.new()
+	craft_result_spacer.custom_minimum_size = Vector2(0, 18)
+	craft_result_box.add_child(craft_result_spacer)
 	craft2_result_slot = KZ_SlotButton.new()
 	craft2_result_slot.set_slot_index(CRAFT2_RESULT)
 	craft2_result_slot.gui_input.connect(Callable(self, "_on_slot_gui_input").bind(CRAFT2_RESULT))
@@ -487,11 +538,67 @@ func _build_ui() -> void:
 	inv_title2.visible = false
 	inv_vbox.add_child(inv_title2)
 
+	creative_panel = PanelContainer.new()
+	creative_panel.visible = false
+	inv_vbox.add_child(creative_panel)
+	var creative_wrap := VBoxContainer.new()
+	creative_wrap.add_theme_constant_override("separation", 6)
+	creative_panel.add_child(creative_wrap)
+	creative_tabs = HBoxContainer.new()
+	creative_tabs.alignment = BoxContainer.ALIGNMENT_CENTER
+	creative_tabs.add_theme_constant_override("separation", 6)
+	creative_wrap.add_child(creative_tabs)
+	for category_name in ["Blocks", "Tools", "Items", "All"]:
+		var tab_btn := Button.new()
+		tab_btn.text = category_name
+		tab_btn.toggle_mode = true
+		tab_btn.button_pressed = category_name == creative_category
+		tab_btn.pressed.connect(Callable(self, "_on_creative_category_pressed").bind(category_name))
+		creative_tabs.add_child(tab_btn)
+	var creative_nav := HBoxContainer.new()
+	creative_nav.alignment = BoxContainer.ALIGNMENT_CENTER
+	creative_nav.add_theme_constant_override("separation", 8)
+	creative_wrap.add_child(creative_nav)
+	creative_prev_button = Button.new()
+	creative_prev_button.text = "←"
+	creative_prev_button.pressed.connect(Callable(self, "_on_creative_prev_pressed"))
+	creative_nav.add_child(creative_prev_button)
+	creative_page_label = Label.new()
+	creative_page_label.text = "Blocks 1/1"
+	creative_nav.add_child(creative_page_label)
+	creative_next_button = Button.new()
+	creative_next_button.text = "→"
+	creative_next_button.pressed.connect(Callable(self, "_on_creative_next_pressed"))
+	creative_nav.add_child(creative_next_button)
+	var creative_center := CenterContainer.new()
+	creative_wrap.add_child(creative_center)
+	creative_grid = GridContainer.new()
+	creative_grid.columns = KZ_Inventory.INV_COLS
+	creative_grid.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	creative_grid.add_theme_constant_override("h_separation", 6)
+	creative_grid.add_theme_constant_override("v_separation", 6)
+	creative_center.add_child(creative_grid)
+	creative_slots.clear()
+	for creative_i in range(18):
+		var creative_slot := KZ_SlotButton.new()
+		creative_slot.set_slot_index(CREATIVE_BASE + creative_i)
+		creative_slot.gui_input.connect(Callable(self, "_on_slot_gui_input").bind(CREATIVE_BASE + creative_i))
+		creative_slot.mouse_entered.connect(Callable(self, "_on_slot_mouse_entered").bind(CREATIVE_BASE + creative_i))
+		creative_grid.add_child(creative_slot)
+		creative_slots.append(creative_slot)
+
+	inv_grid_spacer = Control.new()
+	inv_grid_spacer.custom_minimum_size = Vector2(0, 12)
+	inv_vbox.add_child(inv_grid_spacer)
+
+	var inv_grid_center := CenterContainer.new()
+	inv_vbox.add_child(inv_grid_center)
 	inv_grid = GridContainer.new()
 	inv_grid.columns = KZ_Inventory.INV_COLS
+	inv_grid.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	inv_grid.add_theme_constant_override("h_separation", 6)
 	inv_grid.add_theme_constant_override("v_separation", 6)
-	inv_vbox.add_child(inv_grid)
+	inv_grid_center.add_child(inv_grid)
 
 	inv_slots.clear()
 	for j in range(KZ_Inventory.INV_SIZE):
@@ -558,8 +665,11 @@ func _build_ui() -> void:
 	ct_row.add_child(ct_result_center)
 	var ct_result_box := VBoxContainer.new()
 	ct_result_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	ct_result_box.add_theme_constant_override("separation", 4)
+	ct_result_box.add_theme_constant_override("separation", 8)
 	ct_result_center.add_child(ct_result_box)
+	var ct_spacer := Control.new()
+	ct_spacer.custom_minimum_size = Vector2(0, 84)
+	ct_result_box.add_child(ct_spacer)
 	var ct_res_label := Label.new()
 	ct_res_label.text = "Result"
 	ct_res_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -643,6 +753,11 @@ func _build_ui() -> void:
 	max_fps_spin.value_changed.connect(Callable(self, "_on_max_fps_changed"))
 	fps_row.add_child(max_fps_spin)
 
+	character_button = Button.new()
+	character_button.text = "Character Creation"
+	character_button.pressed.connect(Callable(self, "_on_character_button_pressed"))
+	settings_vbox.add_child(character_button)
+
 	controls_button = Button.new()
 	controls_button.text = "Controls"
 	controls_button.pressed.connect(Callable(self, "_on_controls_button_pressed"))
@@ -662,6 +777,192 @@ func _build_ui() -> void:
 	settings_hint.text = "Auto Step OFF = manual jump. Auto Step ON = step up one block while walking, like Minecraft."
 	settings_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	settings_vbox.add_child(settings_hint)
+
+	character_panel = PanelContainer.new()
+	character_panel.visible = false
+	character_panel.anchor_left = 0.5
+	character_panel.anchor_right = 0.5
+	character_panel.anchor_top = 0.5
+	character_panel.anchor_bottom = 0.5
+	character_panel.offset_left = -390
+	character_panel.offset_right = 390
+	character_panel.offset_top = -255
+	character_panel.offset_bottom = 255
+	character_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	root.add_child(character_panel)
+
+	var character_margin := MarginContainer.new()
+	character_margin.add_theme_constant_override("margin_left", 14)
+	character_margin.add_theme_constant_override("margin_top", 14)
+	character_margin.add_theme_constant_override("margin_right", 14)
+	character_margin.add_theme_constant_override("margin_bottom", 14)
+	character_panel.add_child(character_margin)
+
+	var character_hbox := HBoxContainer.new()
+	character_hbox.add_theme_constant_override("separation", 16)
+	character_margin.add_child(character_hbox)
+
+	var preview_wrap := VBoxContainer.new()
+	preview_wrap.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	preview_wrap.add_theme_constant_override("separation", 8)
+	character_hbox.add_child(preview_wrap)
+
+	var preview_title := Label.new()
+	preview_title.text = "Character Preview"
+	preview_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	preview_wrap.add_child(preview_title)
+
+	character_preview_container = SubViewportContainer.new()
+	character_preview_container.custom_minimum_size = Vector2(360, 420)
+	character_preview_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	character_preview_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	preview_wrap.add_child(character_preview_container)
+
+	character_preview_viewport = SubViewport.new()
+	character_preview_viewport.size = Vector2i(380, 440)
+	character_preview_viewport.transparent_bg = false
+	character_preview_viewport.own_world_3d = true
+	character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	character_preview_container.add_child(character_preview_viewport)
+
+	character_preview_root = Node3D.new()
+	character_preview_root.name = "CharacterPreviewRoot"
+	character_preview_viewport.add_child(character_preview_root)
+
+	var preview_env := WorldEnvironment.new()
+	var preview_env_res := Environment.new()
+	preview_env_res.background_mode = Environment.BG_COLOR
+	preview_env_res.background_color = Color(0.14, 0.15, 0.17, 1.0)
+	preview_env.environment = preview_env_res
+	character_preview_root.add_child(preview_env)
+
+	character_preview_camera = Camera3D.new()
+	character_preview_camera.position = Vector3(0.0, 1.14, -2.65)
+	character_preview_camera.look_at(Vector3(0.0, 1.08, 0.0), Vector3.UP)
+	character_preview_root.add_child(character_preview_camera)
+
+	var preview_light := DirectionalLight3D.new()
+	preview_light.light_energy = 2.2
+	preview_light.rotation_degrees = Vector3(-28.0, -28.0, 0.0)
+	character_preview_root.add_child(preview_light)
+
+	var preview_fill := OmniLight3D.new()
+	preview_fill.light_energy = 1.2
+	preview_fill.position = Vector3(0.7, 1.6, 1.8)
+	character_preview_root.add_child(preview_fill)
+
+	var player_model_script: Script = load("res://player/PlayerModel.gd") as Script
+	if player_model_script != null:
+		character_preview_model = player_model_script.new()
+		if character_preview_model != null:
+			character_preview_root.add_child(character_preview_model)
+			if character_preview_model.has_method("set_first_person_hidden"):
+				character_preview_model.call("set_first_person_hidden", false)
+
+	var character_controls := VBoxContainer.new()
+	character_controls.custom_minimum_size = Vector2(280, 0)
+	character_controls.add_theme_constant_override("separation", 10)
+	character_hbox.add_child(character_controls)
+
+	var character_title := Label.new()
+	character_title.text = "Character Creation"
+	character_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	character_controls.add_child(character_title)
+
+	var sex_row := HBoxContainer.new()
+	sex_row.add_theme_constant_override("separation", 8)
+	character_controls.add_child(sex_row)
+	var sex_label := Label.new()
+	sex_label.text = "Body Sex"
+	sex_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sex_row.add_child(sex_label)
+	character_sex_option = OptionButton.new()
+	character_sex_option.add_item("Male")
+	character_sex_option.add_item("Female")
+	character_sex_option.item_selected.connect(Callable(self, "_on_character_sex_selected"))
+	sex_row.add_child(character_sex_option)
+
+	var build_row := HBoxContainer.new()
+	build_row.add_theme_constant_override("separation", 8)
+	character_controls.add_child(build_row)
+	var build_label := Label.new()
+	build_label.text = "Body Type"
+	build_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	build_row.add_child(build_label)
+	character_build_option = OptionButton.new()
+	character_build_option.add_item("Base")
+	character_build_option.add_item("Slim")
+	character_build_option.add_item("Shredded")
+	character_build_option.add_item("Fat")
+	character_build_option.item_selected.connect(Callable(self, "_on_character_build_selected"))
+	build_row.add_child(character_build_option)
+
+	var height_box := VBoxContainer.new()
+	height_box.add_theme_constant_override("separation", 4)
+	character_controls.add_child(height_box)
+	var height_head := HBoxContainer.new()
+	height_box.add_child(height_head)
+	var height_label := Label.new()
+	height_label.text = "Height"
+	height_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	height_head.add_child(height_label)
+	character_height_value_label = Label.new()
+	character_height_value_label.text = "1.00"
+	height_head.add_child(character_height_value_label)
+	character_height_slider = HSlider.new()
+	character_height_slider.min_value = 0.82
+	character_height_slider.max_value = 1.24
+	character_height_slider.step = 0.01
+	character_height_slider.value_changed.connect(Callable(self, "_on_character_height_changed"))
+	height_box.add_child(character_height_slider)
+
+	var width_box := VBoxContainer.new()
+	width_box.add_theme_constant_override("separation", 4)
+	character_controls.add_child(width_box)
+	var width_head := HBoxContainer.new()
+	width_box.add_child(width_head)
+	var width_label := Label.new()
+	width_label.text = "Width"
+	width_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	width_head.add_child(width_label)
+	character_width_value_label = Label.new()
+	character_width_value_label.text = "1.00"
+	width_head.add_child(character_width_value_label)
+	character_width_slider = HSlider.new()
+	character_width_slider.min_value = 0.78
+	character_width_slider.max_value = 1.28
+	character_width_slider.step = 0.01
+	character_width_slider.value_changed.connect(Callable(self, "_on_character_width_changed"))
+	width_box.add_child(character_width_slider)
+
+	var weight_box := VBoxContainer.new()
+	weight_box.add_theme_constant_override("separation", 4)
+	character_controls.add_child(weight_box)
+	var weight_head := HBoxContainer.new()
+	weight_box.add_child(weight_head)
+	var weight_label := Label.new()
+	weight_label.text = "Body Weight"
+	weight_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	weight_head.add_child(weight_label)
+	character_weight_value_label = Label.new()
+	character_weight_value_label.text = "0.00"
+	weight_head.add_child(character_weight_value_label)
+	character_weight_slider = HSlider.new()
+	character_weight_slider.min_value = -1.0
+	character_weight_slider.max_value = 1.0
+	character_weight_slider.step = 0.05
+	character_weight_slider.value_changed.connect(Callable(self, "_on_character_weight_changed"))
+	weight_box.add_child(character_weight_slider)
+
+	var character_hint := Label.new()
+	character_hint.text = "Live preview updates while you edit. Current female option uses the male base until the female model is added."
+	character_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	character_controls.add_child(character_hint)
+
+	var character_back_button := Button.new()
+	character_back_button.text = "Back to Settings"
+	character_back_button.pressed.connect(Callable(self, "_on_character_back_pressed"))
+	character_controls.add_child(character_back_button)
 
 	controls_panel = PanelContainer.new()
 	controls_panel.anchor_left = 0.5
@@ -773,6 +1074,10 @@ func _connect_signals() -> void:
 		player.auto_step_changed.connect(Callable(self, "_on_auto_step_changed"))
 	if not player.walk_mode_changed.is_connected(Callable(self, "_on_walk_mode_changed")):
 		player.walk_mode_changed.connect(Callable(self, "_on_walk_mode_changed"))
+	if not player.camera_mode_changed.is_connected(Callable(self, "_on_camera_mode_changed")):
+		player.camera_mode_changed.connect(Callable(self, "_on_camera_mode_changed"))
+	if not player.appearance_changed.is_connected(Callable(self, "_on_appearance_changed")):
+		player.appearance_changed.connect(Callable(self, "_on_appearance_changed"))
 	if not player.died.is_connected(Callable(self, "_on_player_died")):
 		player.died.connect(Callable(self, "_on_player_died"))
 	if not player.crafting_table_opened.is_connected(Callable(self, "_on_crafting_table_opened")):
@@ -808,8 +1113,13 @@ func _on_settings_opened(open: bool) -> void:
 	if open:
 		_end_drag()
 		_refresh_render_distance()
+		_refresh_fov()
+		_refresh_max_fps()
+		_refresh_character_controls_from_player()
+		_refresh_character_preview()
 	else:
 		_set_controls_open(false)
+		_set_character_open(false)
 
 func _on_chat_opened(open: bool) -> void:
 	_set_chat_open(open)
@@ -829,6 +1139,13 @@ func _on_auto_step_changed(enabled: bool) -> void:
 func _on_walk_mode_changed(mode_name: String) -> void:
 	_refresh_walk_mode(mode_name)
 
+func _on_camera_mode_changed(mode_name: String) -> void:
+	_refresh_camera_mode(mode_name)
+
+func _on_appearance_changed(_profile: Dictionary) -> void:
+	_refresh_character_controls_from_player()
+	_refresh_character_preview()
+
 func _on_player_died() -> void:
 	death_panel.visible = true
 	crosshair.visible = false
@@ -836,6 +1153,8 @@ func _on_player_died() -> void:
 	inv_panel.visible = false
 	settings_panel.visible = false
 	controls_panel.visible = false
+	if character_panel != null:
+		character_panel.visible = false
 	cursor_panel.visible = false
 	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE as Input.MouseMode)
 
@@ -844,23 +1163,31 @@ func _on_crafting_table_opened(open: bool) -> void:
 	if open:
 		# Keep only the backpack/hotbar visible while the table is open.
 		inv_panel.visible = true
-		inv_panel.offset_top = -110
-		inv_panel.offset_bottom = 250
+		inv_panel.offset_top = 56
+		inv_panel.offset_bottom = 300
+		if inv_grid_spacer != null:
+			inv_grid_spacer.custom_minimum_size = Vector2(0, 28)
 		if inventory_craft_row != null:
 			inventory_craft_row.visible = false
 		if inventory_craft_hint != null:
 			inventory_craft_hint.visible = false
+		if creative_panel != null:
+			creative_panel.visible = false
 		settings_panel.visible = false
 		controls_panel.visible = false
+		if character_panel != null:
+			character_panel.visible = false
 		chat_input_panel.visible = false
 		crosshair.visible = false
-		hotbar_box.offset_top = -82
-		hotbar_box.offset_bottom = -24
+		hotbar_box.offset_top = -74
+		hotbar_box.offset_bottom = -16
 		_refresh_all()
 	else:
 		_return_crafting_items_to_inventory(true)
-		inv_panel.offset_top = -255
-		inv_panel.offset_bottom = 105
+		inv_panel.offset_top = -210
+		inv_panel.offset_bottom = 160
+		if inv_grid_spacer != null:
+			inv_grid_spacer.custom_minimum_size = Vector2(0, 12)
 		if inventory_craft_row != null:
 			inventory_craft_row.visible = true
 		if inventory_craft_hint != null:
@@ -874,27 +1201,44 @@ func _set_inventory_open(open: bool) -> void:
 	if open:
 		settings_panel.visible = false
 		controls_panel.visible = false
+		if character_panel != null:
+			character_panel.visible = false
 		chat_input_panel.visible = false
 		crafting_table_panel.visible = false
+		var creative_mode: bool = _is_creative_mode()
 		if inventory_craft_row != null:
-			inventory_craft_row.visible = true
+			inventory_craft_row.visible = not creative_mode
 		if inventory_craft_hint != null:
-			inventory_craft_hint.visible = true
+			inventory_craft_hint.visible = false
+		if creative_panel != null:
+			creative_panel.visible = creative_mode
+			if creative_mode:
+				_refresh_creative_catalog()
+		inv_panel.offset_top = -210
+		inv_panel.offset_bottom = 160
+		if inv_grid_spacer != null:
+			inv_grid_spacer.custom_minimum_size = Vector2(0, 12)
 		crosshair.visible = false
-		hotbar_box.offset_top = -82
-		hotbar_box.offset_bottom = -24
+		hotbar_box.offset_top = -74
+		hotbar_box.offset_bottom = -16
 	else:
 		_return_crafting_items_to_inventory(false)
+		if creative_panel != null:
+			creative_panel.visible = false
 		crosshair.visible = not player.settings_is_open and not player.chat_is_open and not player.is_dead
 		hotbar_box.offset_top = -70
 		hotbar_box.offset_bottom = -12
 
 func _set_settings_open(open: bool) -> void:
 	settings_panel.visible = open
+	if character_panel != null:
+		character_panel.visible = false
 	if open:
 		inv_panel.visible = false
 		controls_panel.visible = false
 		crafting_table_panel.visible = false
+		if creative_panel != null:
+			creative_panel.visible = false
 		crosshair.visible = false
 	else:
 		crosshair.visible = not player.inventory_is_open and not player.chat_is_open and not player.is_dead
@@ -903,8 +1247,12 @@ func _set_controls_open(open: bool) -> void:
 	controls_panel.visible = open
 	if open:
 		settings_panel.visible = false
+		if character_panel != null:
+			character_panel.visible = false
 		inv_panel.visible = false
 		crafting_table_panel.visible = false
+		if creative_panel != null:
+			creative_panel.visible = false
 		crosshair.visible = false
 	else:
 		crosshair.visible = not player.inventory_is_open and not player.chat_is_open and not player.settings_is_open and not player.is_dead
@@ -916,6 +1264,10 @@ func _set_chat_open(open: bool) -> void:
 		if chat_panel != null:
 			chat_panel.visible = true
 		crafting_table_panel.visible = false
+		if character_panel != null:
+			character_panel.visible = false
+		if creative_panel != null:
+			creative_panel.visible = false
 		crosshair.visible = false
 		call_deferred("_focus_chat_input")
 	else:
@@ -946,6 +1298,10 @@ func _refresh_walk_mode(mode_name: String) -> void:
 	if walk_mode_label != null:
 		walk_mode_label.text = mode_name
 
+func _refresh_camera_mode(mode_name: String) -> void:
+	if camera_mode_label != null:
+		camera_mode_label.text = mode_name
+
 func _refresh_render_distance() -> void:
 	var game_node: Node = _get_game()
 	if game_node != null and game_node.has_method("get_render_distance") and render_distance_spin != null:
@@ -964,10 +1320,113 @@ func _refresh_max_fps() -> void:
 		var current_v: Variant = game_node.call("get_max_fps")
 		max_fps_spin.set_value_no_signal(float(int(current_v)))
 
+func _refresh_character_controls_from_player() -> void:
+	if player == null:
+		return
+	var profile: Dictionary = player.get_character_appearance()
+	var sex: String = str(profile.get("sex", "male")).to_lower()
+	var build: String = str(profile.get("build", "base")).to_lower()
+	var height_scale: float = float(profile.get("height_scale", 1.0))
+	var width_scale: float = float(profile.get("width_scale", 1.0))
+	var body_weight: float = float(profile.get("body_weight", 0.0))
+	if character_sex_option != null:
+		character_sex_option.select(1 if sex == "female" else 0)
+	if character_build_option != null:
+		var build_idx: int = 0
+		match build:
+			"slim":
+				build_idx = 1
+			"shredded":
+				build_idx = 2
+			"fat":
+				build_idx = 3
+			_:
+				build_idx = 0
+		character_build_option.select(build_idx)
+	if character_height_slider != null:
+		character_height_slider.set_value_no_signal(height_scale)
+	if character_width_slider != null:
+		character_width_slider.set_value_no_signal(width_scale)
+	if character_weight_slider != null:
+		character_weight_slider.set_value_no_signal(body_weight)
+	_update_character_value_labels()
+
+func _update_character_value_labels() -> void:
+	if character_height_value_label != null and character_height_slider != null:
+		character_height_value_label.text = "%.2f" % character_height_slider.value
+	if character_width_value_label != null and character_width_slider != null:
+		character_width_value_label.text = "%.2f" % character_width_slider.value
+	if character_weight_value_label != null and character_weight_slider != null:
+		character_weight_value_label.text = "%.2f" % character_weight_slider.value
+
+func _refresh_character_preview() -> void:
+	if character_preview_model == null or player == null:
+		return
+	var app_script: Script = load("res://player/CharacterAppearance.gd") as Script
+	if app_script == null:
+		return
+	var preview_profile: RefCounted = app_script.new()
+	if preview_profile != null and preview_profile.has_method("apply_dict"):
+		preview_profile.call("apply_dict", player.get_character_appearance())
+		if character_preview_model.has_method("set_appearance_profile"):
+			character_preview_model.call("set_appearance_profile", preview_profile)
+		elif character_preview_model.has_method("apply_profile"):
+			character_preview_model.call("apply_profile")
+	if character_preview_model.has_method("set_first_person_hidden"):
+		character_preview_model.call("set_first_person_hidden", false)
+
+func _apply_character_ui_changes() -> void:
+	if player == null:
+		return
+	var profile: Dictionary = player.get_character_appearance()
+	if character_sex_option != null:
+		profile["sex"] = "female" if character_sex_option.selected == 1 else "male"
+	if character_build_option != null:
+		match character_build_option.selected:
+			1:
+				profile["build"] = "slim"
+			2:
+				profile["build"] = "shredded"
+			3:
+				profile["build"] = "fat"
+			_:
+				profile["build"] = "base"
+	if character_height_slider != null:
+		profile["height_scale"] = character_height_slider.value
+	if character_width_slider != null:
+		profile["width_scale"] = character_width_slider.value
+	if character_weight_slider != null:
+		profile["body_weight"] = character_weight_slider.value
+	_update_character_value_labels()
+	player.apply_character_appearance(profile)
+
+func _set_character_open(open: bool) -> void:
+	if character_panel == null:
+		return
+	character_panel.visible = open
+	if open:
+		settings_panel.visible = false
+		controls_panel.visible = false
+		inv_panel.visible = false
+		crafting_table_panel.visible = false
+		if creative_panel != null:
+			creative_panel.visible = false
+		crosshair.visible = false
+		_refresh_character_controls_from_player()
+		_refresh_character_preview()
+	else:
+		if player != null and player.settings_is_open:
+			settings_panel.visible = true
+		if player != null:
+			crosshair.visible = not player.inventory_is_open and not player.chat_is_open and not player.settings_is_open and not player.is_dead
+		else:
+			crosshair.visible = true
+
 func _refresh_all() -> void:
 	_refresh_hotbar()
 	_refresh_inventory()
 	_refresh_crafting_views()
+	_refresh_creative_view()
 	_refresh_cursor()
 
 func _refresh_hotbar() -> void:
@@ -977,7 +1436,7 @@ func _refresh_hotbar() -> void:
 		var c: int = inv.hotbar_counts[i]
 		var tint: Color = _tint_for_id(id)
 		var sel: bool = (i == inv.selected_index)
-		hotbar_slots[i].set_visual(id, c, tint, sel)
+		hotbar_slots[i].set_visual(id, c, tint, sel, _preview_for_item(id))
 		hotbar_slots[i].tooltip_text = _tooltip_for_item(id)
 
 func _refresh_inventory() -> void:
@@ -986,7 +1445,7 @@ func _refresh_inventory() -> void:
 		var id: String = inv.inv_ids[j]
 		var c: int = inv.inv_counts[j]
 		var tint: Color = _tint_for_id(id)
-		inv_slots[j].set_visual(id, c, tint, false)
+		inv_slots[j].set_visual(id, c, tint, false, _preview_for_item(id))
 		inv_slots[j].tooltip_text = _tooltip_for_item(id)
 
 func _refresh_crafting_views() -> void:
@@ -995,18 +1454,18 @@ func _refresh_crafting_views() -> void:
 	for i in range(craft2_slots.size()):
 		var id: String = craft2_ids[i]
 		var count: int = craft2_counts[i]
-		craft2_slots[i].set_visual(id, count, _tint_for_id(id), false)
+		craft2_slots[i].set_visual(id, count, _tint_for_id(id), false, _preview_for_item(id))
 		craft2_slots[i].tooltip_text = _tooltip_for_item(id)
 	if craft2_result_slot != null:
-		craft2_result_slot.set_visual(craft2_result_id, craft2_result_count, _tint_for_id(craft2_result_id), false)
+		craft2_result_slot.set_visual(craft2_result_id, craft2_result_count, _tint_for_id(craft2_result_id), false, _preview_for_item(craft2_result_id))
 		craft2_result_slot.tooltip_text = _tooltip_for_item(craft2_result_id)
 	for j in range(craft3_slots.size()):
 		var id3: String = craft3_ids[j]
 		var count3: int = craft3_counts[j]
-		craft3_slots[j].set_visual(id3, count3, _tint_for_id(id3), false)
+		craft3_slots[j].set_visual(id3, count3, _tint_for_id(id3), false, _preview_for_item(id3))
 		craft3_slots[j].tooltip_text = _tooltip_for_item(id3)
 	if craft3_result_slot != null:
-		craft3_result_slot.set_visual(craft3_result_id, craft3_result_count, _tint_for_id(craft3_result_id), false)
+		craft3_result_slot.set_visual(craft3_result_id, craft3_result_count, _tint_for_id(craft3_result_id), false, _preview_for_item(craft3_result_id))
 		craft3_result_slot.tooltip_text = _tooltip_for_item(craft3_result_id)
 
 func _refresh_craft_result(grid_size: int) -> void:
@@ -1134,6 +1593,83 @@ func _refresh_cursor() -> void:
 	cursor_icon.color = _tint_for_id(player.cursor_item_id)
 	cursor_label.text = "%s x%d" % [_display_item_name(player.cursor_item_id), player.cursor_count]
 
+func _is_creative_mode() -> bool:
+	var game_node: Node = _get_game()
+	return game_node != null and game_node.has_method("is_creative_mode") and bool(game_node.call("is_creative_mode"))
+
+func _refresh_creative_catalog() -> void:
+	creative_entries.clear()
+	creative_filtered_entries.clear()
+	var game_node: Node = _get_game()
+	if game_node == null or not game_node.has_method("get_registry_entries"):
+		return
+	var entries_v: Variant = game_node.call("get_registry_entries")
+	if typeof(entries_v) != TYPE_ARRAY:
+		return
+	var entries: Array = entries_v as Array
+	for entry_v in entries:
+		if typeof(entry_v) != TYPE_DICTIONARY:
+			continue
+		var entry: Dictionary = entry_v as Dictionary
+		var sid: String = str(entry.get("string_id", ""))
+		if sid == "" or sid == "kaizencraft:air":
+			continue
+		creative_entries.append(entry)
+	creative_entries.sort_custom(Callable(self, "_compare_creative_entries"))
+	for entry in creative_entries:
+		var category_name: String = str((entry as Dictionary).get("category", "Blocks"))
+		if creative_category != "All" and category_name != creative_category:
+			continue
+		creative_filtered_entries.append(entry)
+	var page_count: int = maxi(1, int(ceil(float(creative_filtered_entries.size()) / float(maxi(1, creative_slots.size())))))
+	creative_page = clampi(creative_page, 0, page_count - 1)
+	_refresh_creative_view()
+
+func _refresh_creative_view() -> void:
+	var page_size: int = maxi(1, creative_slots.size())
+	var page_count: int = maxi(1, int(ceil(float(creative_filtered_entries.size()) / float(page_size))))
+	creative_page = clampi(creative_page, 0, page_count - 1)
+	if creative_page_label != null:
+		creative_page_label.text = "%s %d/%d" % [creative_category, creative_page + 1, page_count]
+	if creative_prev_button != null:
+		creative_prev_button.disabled = creative_page <= 0
+	if creative_next_button != null:
+		creative_next_button.disabled = creative_page >= page_count - 1
+	if creative_tabs != null:
+		for child in creative_tabs.get_children():
+			if child is Button:
+				var child_btn: Button = child as Button
+				child_btn.set_pressed_no_signal(child_btn.text == creative_category)
+	var start_index: int = creative_page * page_size
+	for i in range(creative_slots.size()):
+		var btn: KZ_SlotButton = creative_slots[i]
+		var entry_index: int = start_index + i
+		if entry_index < creative_filtered_entries.size():
+			var entry: Dictionary = creative_filtered_entries[entry_index] as Dictionary
+			var sid: String = str(entry.get("string_id", ""))
+			btn.visible = true
+			btn.set_visual(sid, 1, _tint_for_id(sid), false, _preview_for_item(sid))
+			btn.tooltip_text = _tooltip_for_item(sid)
+		else:
+			btn.visible = false
+			btn.tooltip_text = ""
+
+func _is_creative_slot(g: int) -> bool:
+	return g >= CREATIVE_BASE and g < CREATIVE_BASE + creative_slots.size()
+
+func _handle_creative_slot_click(g: int, button_index: int) -> void:
+	var idx: int = g - CREATIVE_BASE + creative_page * maxi(1, creative_slots.size())
+	if idx < 0 or idx >= creative_filtered_entries.size():
+		return
+	var entry: Dictionary = creative_filtered_entries[idx] as Dictionary
+	var sid: String = str(entry.get("string_id", ""))
+	if sid == "":
+		return
+	var count: int = 1 if button_index == MouseButton.MOUSE_BUTTON_RIGHT else player.inventory.max_stack_for(sid)
+	player.cursor_item_id = sid
+	player.cursor_count = max(1, count)
+	player.emit_signal("inventory_changed")
+
 func _refresh_controls_ui() -> void:
 	for child in controls_list.get_children():
 		child.queue_free()
@@ -1166,6 +1702,52 @@ func _refresh_controls_ui() -> void:
 		btn.pressed.connect(Callable(self, "_on_control_bind_button_pressed").bind(action))
 		row.add_child(btn)
 		control_buttons[action] = btn
+
+func _compare_creative_entries(a: Dictionary, b: Dictionary) -> bool:
+	return int(a.get("order", 999999)) < int(b.get("order", 999999))
+
+func _on_creative_category_pressed(category_name: String) -> void:
+	creative_category = category_name
+	creative_page = 0
+	_refresh_creative_catalog()
+
+func _on_creative_prev_pressed() -> void:
+	creative_page = maxi(0, creative_page - 1)
+	_refresh_creative_view()
+
+func _on_creative_next_pressed() -> void:
+	creative_page += 1
+	_refresh_creative_view()
+
+func _load_preview_texture(path: String) -> Texture2D:
+	if path == "":
+		return null
+	if _texture_cache.has(path):
+		return _texture_cache[path] as Texture2D
+	if not ResourceLoader.exists(path):
+		return null
+	var tex: Texture2D = load(path) as Texture2D
+	_texture_cache[path] = tex
+	return tex
+
+func _preview_for_item(item_id: String) -> Dictionary:
+	if item_id == "" or registry == null:
+		return {}
+	var paths: Dictionary = registry.get_preview_paths(item_id)
+	if paths.is_empty():
+		return {}
+	var top_path: String = str(paths.get("top", ""))
+	var side_path: String = str(paths.get("side", ""))
+	var all_path: String = str(paths.get("all", ""))
+	var front_path: String = side_path if side_path != "" else all_path
+	if front_path == "":
+		front_path = top_path
+	return {
+		"mode": str(paths.get("mode", "item")),
+		"top_tex": _load_preview_texture(top_path),
+		"side_tex": _load_preview_texture(side_path if side_path != "" else all_path),
+		"front_tex": _load_preview_texture(front_path)
+	}
 
 func _tooltip_for_item(item_id: String) -> String:
 	if item_id == "":
@@ -1210,6 +1792,29 @@ func _on_max_fps_changed(value: float) -> void:
 	var game_node: Node = _get_game()
 	if game_node != null and game_node.has_method("set_max_fps"):
 		game_node.call("set_max_fps", value)
+
+func _on_character_button_pressed() -> void:
+	_set_character_open(true)
+
+func _on_character_back_pressed() -> void:
+	_set_character_open(false)
+	if player != null and player.settings_is_open:
+		settings_panel.visible = true
+
+func _on_character_sex_selected(_idx: int) -> void:
+	_apply_character_ui_changes()
+
+func _on_character_build_selected(_idx: int) -> void:
+	_apply_character_ui_changes()
+
+func _on_character_height_changed(_value: float) -> void:
+	_apply_character_ui_changes()
+
+func _on_character_width_changed(_value: float) -> void:
+	_apply_character_ui_changes()
+
+func _on_character_weight_changed(_value: float) -> void:
+	_apply_character_ui_changes()
 
 func _on_controls_button_pressed() -> void:
 	controls_status_label.text = "Select an action, then press a key or mouse button."
@@ -1290,6 +1895,15 @@ func _on_slot_gui_input(event: InputEvent, g: int) -> void:
 	if mb.is_echo():
 		return
 
+	if _is_creative_slot(g):
+		if Input.is_mouse_button_pressed(MouseButton.MOUSE_BUTTON_LEFT):
+			_handle_creative_slot_click(g, MouseButton.MOUSE_BUTTON_LEFT)
+			get_viewport().set_input_as_handled()
+		elif Input.is_mouse_button_pressed(MouseButton.MOUSE_BUTTON_RIGHT):
+			_handle_creative_slot_click(g, MouseButton.MOUSE_BUTTON_RIGHT)
+			get_viewport().set_input_as_handled()
+		return
+
 	if _is_craft_slot(g):
 		if not mb.pressed:
 			return
@@ -1351,7 +1965,16 @@ func _on_slot_gui_input(event: InputEvent, g: int) -> void:
 func _on_slot_mouse_entered(g: int) -> void:
 	if player == null:
 		return
-	if _is_craft_slot(g):
+	if _is_creative_slot(g):
+		if Input.is_mouse_button_pressed(MouseButton.MOUSE_BUTTON_LEFT):
+			_handle_creative_slot_click(g, MouseButton.MOUSE_BUTTON_LEFT)
+			get_viewport().set_input_as_handled()
+		elif Input.is_mouse_button_pressed(MouseButton.MOUSE_BUTTON_RIGHT):
+			_handle_creative_slot_click(g, MouseButton.MOUSE_BUTTON_RIGHT)
+			get_viewport().set_input_as_handled()
+		return
+
+	if _is_creative_slot(g) or _is_craft_slot(g):
 		return
 	if not player.inventory_is_open and not player.crafting_table_is_open:
 		return
@@ -1513,7 +2136,7 @@ func _apply_left_drag_distribution() -> void:
 			valid_slots.append(slot_g)
 	if valid_slots.is_empty():
 		return
-	var share: int = int(player.cursor_count / valid_slots.size())
+	var share: int = int(float(player.cursor_count) / float(valid_slots.size()))
 	var remainder: int = player.cursor_count % valid_slots.size()
 	if share <= 0:
 		share = 1
