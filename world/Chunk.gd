@@ -6,6 +6,7 @@ var mesh_instance: MeshInstance3D
 
 func _init() -> void:
 	mesh_instance = MeshInstance3D.new()
+	mesh_instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	add_child(mesh_instance)
 
 func set_chunk_pos(p: Vector2i) -> void:

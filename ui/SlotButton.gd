@@ -19,6 +19,7 @@ func _init() -> void:
 	size_flags_vertical = Control.SIZE_SHRINK_CENTER
 
 	_border = Panel.new()
+	_border.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_border.anchor_left = 0.0
 	_border.anchor_top = 0.0
 	_border.anchor_right = 1.0
@@ -26,6 +27,7 @@ func _init() -> void:
 	add_child(_border)
 
 	_icon = ColorRect.new()
+	_icon.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_icon.anchor_left = 0.14
 	_icon.anchor_top = 0.14
 	_icon.anchor_right = 0.86
@@ -34,6 +36,7 @@ func _init() -> void:
 	_border.add_child(_icon)
 
 	_count_label = Label.new()
+	_count_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_count_label.anchor_left = 0.0
 	_count_label.anchor_top = 0.0
 	_count_label.anchor_right = 1.0

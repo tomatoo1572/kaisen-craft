@@ -1,5 +1,4 @@
 extends Node
-class_name KZ_LocalWorldServer
 
 signal chunk_mesh_updated(chunk_pos: Vector2i, mesh_arrays: Dictionary)
 signal block_broken(world_block: Vector3i, runtime_id: int)
@@ -17,9 +16,16 @@ var cache_max_chunks: int = 256
 var terrain_frequency: float = 0.008
 var terrain_base_height: int = 64
 var terrain_height_scale: int = 28
+var tree_spawn_chance_percent: int = 1
+var tree_edge_margin: int = 3
 
 var registry: KZ_BlockRegistry
 var grass_runtime_id: int = 1
+var dirt_runtime_id: int = 1
+var oak_log_runtime_id: int = 1
+var oak_leaves_runtime_id: int = 1
+var oak_planks_runtime_id: int = 1
+var crafting_table_runtime_id: int = 1
 
 # Main-thread noise (performance)
 var _main_noise: FastNoiseLite
@@ -42,6 +48,11 @@ var _mesh_jobs: Dictionary = {}     # Vector2i -> Thread
 
 # If edits happen while a mesh job is running, mark dirty and rebuild again
 var _mesh_dirty: Dictionary = {}    # Vector2i -> bool
+var _mesh_revision: Dictionary = {} # Vector2i -> int
+
+var _chunk_edits_dirty: bool = false
+var _chunk_edits_save_timer: float = 0.0
+var _chunk_edits_save_interval_sec: float = 1.0
 
 func setup(p_world_root: String, worldgen_cfg: Dictionary, block_registry: KZ_BlockRegistry) -> void:
 	world_root = p_world_root
@@ -49,9 +60,15 @@ func setup(p_world_root: String, worldgen_cfg: Dictionary, block_registry: KZ_Bl
 
 	_apply_worldgen(worldgen_cfg)
 	_load_or_create_world_files()
+	_load_chunk_edits()
 	_rebuild_main_noise()
 
 	grass_runtime_id = registry.get_runtime_id("kaizencraft:grass")
+	dirt_runtime_id = registry.get_runtime_id("kaizencraft:dirt")
+	oak_log_runtime_id = registry.get_runtime_id("kaizencraft:oak_log")
+	oak_leaves_runtime_id = registry.get_runtime_id("kaizencraft:oak_leaves")
+	oak_planks_runtime_id = registry.get_runtime_id("kaizencraft:oak_planks")
+	crafting_table_runtime_id = registry.get_runtime_id("kaizencraft:crafting_table")
 
 func _exit_tree() -> void:
 	_join_all_threads()
@@ -79,11 +96,15 @@ func _join_all_threads() -> void:
 			var _ignored2: Variant = t2.wait_to_finish()
 	_mesh_jobs.clear()
 
-func _process(_dt: float) -> void:
+func _process(dt: float) -> void:
 	# Prioritize mesh jobs (fast visual feedback on edits)
 	_start_jobs()
 	_collect_finished_gen()
 	_collect_finished_mesh()
+	if _chunk_edits_dirty:
+		_chunk_edits_save_timer += dt
+		if _chunk_edits_save_timer >= _chunk_edits_save_interval_sec:
+			_save_chunk_edits()
 
 func _start_jobs() -> void:
 	while (_gen_jobs.size() + _mesh_jobs.size()) < max_worker_threads:
@@ -210,7 +231,11 @@ func get_block_at_world(wx: int, wy: int, wz: int) -> int:
 	if lx < 0 or lx >= dims.x or lz < 0 or lz >= dims.z:
 		# Shouldn't happen, but safe fallback.
 		var hh0: int = get_height_at_world(wx, wz)
-		return grass_runtime_id if wy <= hh0 else 0
+		if wy > hh0:
+			return 0
+		if wy == hh0:
+			return grass_runtime_id
+		return dirt_runtime_id
 
 	var li: int = _idx_local(lx, wy, lz)
 
@@ -227,8 +252,52 @@ func get_block_at_world(wx: int, wy: int, wz: int) -> int:
 	if edits.has(li):
 		return int(edits[li])
 
+	return _get_generated_block_at_world(wx, wy, wz)
+
+func is_block_collidable_at_world(wx: int, wy: int, wz: int) -> bool:
+	var rid: int = get_block_at_world(wx, wy, wz)
+	if rid == 0:
+		return false
+	if registry != null:
+		return registry.is_collidable(rid)
+	return true
+
+func _mark_chunk_edits_dirty() -> void:
+	_chunk_edits_dirty = true
+	_chunk_edits_save_timer = 0.0
+
+func _get_generated_block_at_world(wx: int, wy: int, wz: int) -> int:
 	var hgt: int = get_height_at_world(wx, wz)
-	return grass_runtime_id if wy <= hgt else 0
+	if wy <= hgt:
+		if wy == hgt:
+			return grass_runtime_id
+		return dirt_runtime_id
+	return _get_generated_tree_block_at_world(wx, wy, wz)
+
+func _get_generated_tree_block_at_world(wx: int, wy: int, wz: int) -> int:
+	var height_at_callable: Callable = Callable(self, "get_height_at_world")
+	for tz in range(wz - 3, wz + 4):
+		for tx in range(wx - 3, wx + 4):
+			var tcpos: Vector2i = _world_to_chunk(tx, tz)
+			var origin_x: int = tcpos.x * dims.x
+			var origin_z: int = tcpos.y * dims.z
+			var lx: int = tx - origin_x
+			var lz: int = tz - origin_z
+			if lx < tree_edge_margin or lx >= dims.x - tree_edge_margin:
+				continue
+			if lz < tree_edge_margin or lz >= dims.z - tree_edge_margin:
+				continue
+			var ground_y: int = get_height_at_world(tx, tz)
+			if not _should_place_tree_at_world(tx, tz, ground_y, height_at_callable, world_seed):
+				continue
+			var variant: int = _tree_variant_for_world(tx, tz, world_seed)
+			var trunk_height: int = _tree_trunk_height_for_variant(variant)
+			var base_y: int = ground_y + 1
+			if wx == tx and wz == tz and wy >= base_y and wy < base_y + trunk_height:
+				return oak_log_runtime_id
+			if _tree_has_block_at_variant(variant, tx, base_y, tz, wx, wy, wz):
+				return oak_leaves_runtime_id
+	return 0
 
 func get_surface_y(wx: int, wz: int) -> int:
 	# Fast path: use cached heightmap if available.
@@ -305,11 +374,12 @@ func _break_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int) -> b
 	var edits: Dictionary = edits_v as Dictionary
 	edits[li] = 0
 	_chunk_edits[chunk_pos] = edits
+	_mark_chunk_edits_dirty()
 
 	emit_signal("block_broken", Vector3i(wx, wy, wz), old_id)
 
-	_schedule_remesh(chunk_pos)
-	_schedule_neighbor_remesh_if_edge(chunk_pos, lx, lz)
+	_rebuild_chunk_mesh_now(chunk_pos)
+	_rebuild_neighbor_mesh_if_edge(chunk_pos, lx, lz)
 	return true
 
 func _place_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int, runtime_id: int) -> bool:
@@ -349,11 +419,12 @@ func _place_in_cached_chunk(chunk_pos: Vector2i, wx: int, wy: int, wz: int, runt
 	var edits: Dictionary = edits_v as Dictionary
 	edits[li] = runtime_id
 	_chunk_edits[chunk_pos] = edits
+	_mark_chunk_edits_dirty()
 
 	emit_signal("block_placed", Vector3i(wx, wy, wz), runtime_id)
 
-	_schedule_remesh(chunk_pos)
-	_schedule_neighbor_remesh_if_edge(chunk_pos, lx, lz)
+	_rebuild_chunk_mesh_now(chunk_pos)
+	_rebuild_neighbor_mesh_if_edge(chunk_pos, lx, lz)
 	return true
 
 func _schedule_neighbor_remesh_if_edge(chunk_pos: Vector2i, lx: int, lz: int) -> void:
@@ -367,9 +438,28 @@ func _schedule_neighbor_remesh_if_edge(chunk_pos: Vector2i, lx: int, lz: int) ->
 	elif lz == dims.z - 1:
 		_schedule_remesh(Vector2i(chunk_pos.x, chunk_pos.y + 1))
 
+func _rebuild_neighbor_mesh_if_edge(chunk_pos: Vector2i, lx: int, lz: int) -> void:
+	# Keep the edited chunk instant, but rebuild neighbor chunks asynchronously.
+	# This preserves edge correctness without hitching the frame every time a border block changes.
+	if lx == 0:
+		_schedule_remesh(Vector2i(chunk_pos.x - 1, chunk_pos.y))
+	elif lx == dims.x - 1:
+		_schedule_remesh(Vector2i(chunk_pos.x + 1, chunk_pos.y))
+
+	if lz == 0:
+		_schedule_remesh(Vector2i(chunk_pos.x, chunk_pos.y - 1))
+	elif lz == dims.z - 1:
+		_schedule_remesh(Vector2i(chunk_pos.x, chunk_pos.y + 1))
+
+func _bump_mesh_revision(chunk_pos: Vector2i) -> int:
+	var rev: int = int(_mesh_revision.get(chunk_pos, 0)) + 1
+	_mesh_revision[chunk_pos] = rev
+	return rev
+
 func _schedule_remesh(chunk_pos: Vector2i) -> void:
 	if not _cache.has(chunk_pos):
 		return
+	_bump_mesh_revision(chunk_pos)
 	# If a mesh build is already running, mark dirty so we rebuild again afterwards.
 	if _mesh_jobs.has(chunk_pos):
 		_mesh_dirty[chunk_pos] = true
@@ -378,11 +468,31 @@ func _schedule_remesh(chunk_pos: Vector2i) -> void:
 		return
 	_pending_mesh.append(chunk_pos)
 
-func _on_mesh_built(chunk_pos: Vector2i, result_v: Variant) -> void:
-	if typeof(result_v) != TYPE_DICTIONARY:
+func _rebuild_chunk_mesh_now(chunk_pos: Vector2i) -> void:
+	if not _cache.has(chunk_pos):
 		return
-	var result: Dictionary = result_v as Dictionary
+	var rev: int = _bump_mesh_revision(chunk_pos)
+	var payload: Dictionary = _build_mesh_job_payload(chunk_pos)
+	payload["revision"] = rev
+	var result: Dictionary = _build_mesh_result(chunk_pos, payload)
+	_apply_mesh_build_result(chunk_pos, result)
 
+func _schedule_remesh_front(chunk_pos: Vector2i) -> void:
+	if not _cache.has(chunk_pos):
+		return
+	_bump_mesh_revision(chunk_pos)
+	if _mesh_jobs.has(chunk_pos):
+		_mesh_dirty[chunk_pos] = true
+		return
+	if _pending_mesh.has(chunk_pos):
+		_pending_mesh.erase(chunk_pos)
+	_pending_mesh.push_front(chunk_pos)
+
+func _apply_mesh_build_result(chunk_pos: Vector2i, result: Dictionary) -> void:
+	var result_revision: int = int(result.get("revision", 0))
+	var current_revision: int = int(_mesh_revision.get(chunk_pos, 0))
+	if result_revision != 0 and result_revision != current_revision:
+		return
 	var arrays_v: Variant = result.get("mesh_arrays")
 	if typeof(arrays_v) != TYPE_DICTIONARY:
 		return
@@ -395,10 +505,15 @@ func _on_mesh_built(chunk_pos: Vector2i, result_v: Variant) -> void:
 
 	emit_signal("chunk_mesh_updated", chunk_pos, mesh_arrays)
 
-	# If edits happened during the build, schedule another rebuild now.
+func _on_mesh_built(chunk_pos: Vector2i, result_v: Variant) -> void:
+	if typeof(result_v) != TYPE_DICTIONARY:
+		return
+	var result: Dictionary = result_v as Dictionary
+	_apply_mesh_build_result(chunk_pos, result)
+
 	if _mesh_dirty.has(chunk_pos):
 		_mesh_dirty.erase(chunk_pos)
-		_schedule_remesh(chunk_pos)
+		_schedule_remesh_front(chunk_pos)
 
 # ----------------------------
 # Heightmap
@@ -441,6 +556,11 @@ func _build_gen_job_cfg(chunk_pos: Vector2i) -> Dictionary:
 		"base_h": terrain_base_height,
 		"scale_h": terrain_height_scale,
 		"grass_id": grass_runtime_id,
+		"dirt_id": dirt_runtime_id,
+		"log_id": oak_log_runtime_id,
+		"leaves_id": oak_leaves_runtime_id,
+		"planks_id": oak_planks_runtime_id,
+		"crafting_table_id": crafting_table_runtime_id,
 		"edits": edits,
 		"neighbors": neighbors
 	}
@@ -450,6 +570,7 @@ func _build_mesh_job_payload(chunk_pos: Vector2i) -> Dictionary:
 	var vox_v: Variant = ch.get("voxels")
 	var vox: PackedByteArray = vox_v as PackedByteArray
 	var neighbors: Dictionary = _get_neighbor_voxels(chunk_pos)
+	var mesh_y_max: int = _estimate_mesh_y_max(vox)
 
 	return {
 		"seed": world_seed,
@@ -458,8 +579,15 @@ func _build_mesh_job_payload(chunk_pos: Vector2i) -> Dictionary:
 		"base_h": terrain_base_height,
 		"scale_h": terrain_height_scale,
 		"grass_id": grass_runtime_id,
+		"dirt_id": dirt_runtime_id,
+		"log_id": oak_log_runtime_id,
+		"leaves_id": oak_leaves_runtime_id,
+		"planks_id": oak_planks_runtime_id,
+		"crafting_table_id": crafting_table_runtime_id,
 		"voxels": vox,
-		"neighbors": neighbors
+		"neighbors": neighbors,
+		"mesh_y_max": mesh_y_max,
+		"revision": int(_mesh_revision.get(chunk_pos, 0))
 	}
 
 func _get_neighbor_voxels(chunk_pos: Vector2i) -> Dictionary:
@@ -478,6 +606,26 @@ func _try_put_neighbor_voxels(out: Dictionary, key: String, pos: Vector2i) -> vo
 	if typeof(vox_v) == TYPE_PACKED_BYTE_ARRAY:
 		out[key] = vox_v
 
+func _estimate_mesh_y_max(vox: PackedByteArray) -> int:
+	for y in range(dims.y - 1, -1, -1):
+		var row_base: int = y * dims.x * dims.z
+		var row_end: int = row_base + dims.x * dims.z
+		for i in range(row_base, row_end):
+			if i >= 0 and i < vox.size() and int(vox[i]) != 0:
+				return y
+	return 0
+
+func _queue_adjacent_chunk_refreshes(chunk_pos: Vector2i) -> void:
+	var neighbors: Array[Vector2i] = [
+		Vector2i(chunk_pos.x - 1, chunk_pos.y),
+		Vector2i(chunk_pos.x + 1, chunk_pos.y),
+		Vector2i(chunk_pos.x, chunk_pos.y - 1),
+		Vector2i(chunk_pos.x, chunk_pos.y + 1)
+	]
+	for npos in neighbors:
+		if _cache.has(npos):
+			_schedule_remesh_front(npos)
+
 # ----------------------------
 # Generation + mesh threads
 # ----------------------------
@@ -494,6 +642,8 @@ func _on_chunk_generated(chunk_pos: Vector2i, result_v: Variant) -> void:
 	while _cache_order.size() > cache_max_chunks:
 		var old: Vector2i = _cache_order.pop_front()
 		_cache.erase(old)
+
+	_queue_adjacent_chunk_refreshes(chunk_pos)
 
 	if _gen_callbacks.has(chunk_pos):
 		var arr: Array = _gen_callbacks[chunk_pos] as Array
@@ -518,6 +668,11 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	var base_h: int = int(cfg["base_h"])
 	var scale_h: int = int(cfg["scale_h"])
 	var grass_id: int = int(cfg["grass_id"])
+	var dirt_id: int = int(cfg.get("dirt_id", grass_id))
+	var log_id: int = int(cfg.get("log_id", grass_id))
+	var leaves_id: int = int(cfg.get("leaves_id", grass_id))
+	var planks_id: int = int(cfg.get("planks_id", dirt_id))
+	var crafting_table_id: int = int(cfg.get("crafting_table_id", planks_id))
 
 	var edits_v: Variant = cfg.get("edits", {})
 	var edits: Dictionary = edits_v as Dictionary
@@ -553,7 +708,20 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 			var wz: int = origin_z + z
 			var hh: int = int(height_at.call(wx, wz))
 			for y in range(sy):
-				vox[idx.call(x, y, z)] = grass_id if y <= hh else 0
+				if y > hh:
+					vox[idx.call(x, y, z)] = 0
+				elif y == hh:
+					vox[idx.call(x, y, z)] = grass_id
+				else:
+					vox[idx.call(x, y, z)] = dirt_id
+
+	for z in range(tree_edge_margin, sz - tree_edge_margin):
+		for x in range(tree_edge_margin, sx - tree_edge_margin):
+			var wx_tree: int = origin_x + x
+			var wz_tree: int = origin_z + z
+			var ground_y: int = int(height_at.call(wx_tree, wz_tree))
+			if _should_place_tree_at_world(wx_tree, wz_tree, ground_y, height_at, local_seed):
+				_place_tree_into_voxels(vox, sx, sy, sz, x, ground_y + 1, z, log_id, leaves_id, _tree_variant_for_world(wx_tree, wz_tree, local_seed))
 
 	# Apply sparse edits
 	var edit_keys: Array = edits.keys()
@@ -607,17 +775,30 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 				return int(svox[idx.call(lx, wy, zz)])
 
 		var hh2: int = int(height_at.call(wx, wz))
-		return grass_id if wy <= hh2 else 0
+		if wy > hh2:
+			return 0
+		if wy == hh2:
+			return grass_id
+		return dirt_id
 
 	var chunk_origin_world := Vector3(origin_x, 0, origin_z)
+	var mesh_y_max: int = 0
+	for hm_v in hm:
+		mesh_y_max = maxi(mesh_y_max, int(hm_v))
+	mesh_y_max = clampi(mesh_y_max + 8, 0, sy - 1)
+
+	var face_material_for_runtime := func(rid: int, axis: int, dir: int) -> int:
+		return _face_material_id_for_runtime(rid, axis, dir, grass_id, dirt_id, log_id, leaves_id, planks_id, crafting_table_id)
+	var is_runtime_solid := func(rid: int) -> bool:
+		return rid != 0
+
 	var mesh_arrays: Dictionary = KZ_ChunkMeshBuilder.build_mesh_arrays(
 		chunk_origin_world,
 		local_dims,
 		get_block_world,
-		func(rid: int) -> Color:
-			return Color(0.4078, 0.7607, 0.2823, 1.0) if rid == grass_id else Color(1, 1, 1, 1),
-		func(rid: int) -> bool:
-			return rid != 0
+		face_material_for_runtime,
+		is_runtime_solid,
+		mesh_y_max
 	)
 
 	return {
@@ -630,12 +811,20 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	}
 
 func _thread_build_mesh(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
+	return _build_mesh_result(chunk_pos, payload)
+
+func _build_mesh_result(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 	var local_seed: int = int(payload["seed"])
 	var local_dims: Vector3i = payload["dims"] as Vector3i
 	var freq: float = float(payload["freq"])
 	var base_h: int = int(payload["base_h"])
 	var scale_h: int = int(payload["scale_h"])
 	var grass_id: int = int(payload["grass_id"])
+	var dirt_id: int = int(payload.get("dirt_id", grass_id))
+	var log_id: int = int(payload.get("log_id", grass_id))
+	var leaves_id: int = int(payload.get("leaves_id", grass_id))
+	var planks_id: int = int(payload.get("planks_id", dirt_id))
+	var crafting_table_id: int = int(payload.get("crafting_table_id", planks_id))
 
 	var vox_v: Variant = payload.get("voxels")
 	var vox: PackedByteArray = vox_v as PackedByteArray
@@ -694,20 +883,176 @@ func _thread_build_mesh(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 				return int(svox[idx.call(lx, wy, zz)])
 
 		var hh: int = int(height_at.call(wx, wz))
-		return grass_id if wy <= hh else 0
+		if wy > hh:
+			return 0
+		if wy == hh:
+			return grass_id
+		return dirt_id
 
 	var chunk_origin_world := Vector3(origin_x, 0, origin_z)
+	var mesh_y_max: int = clampi(int(payload.get("mesh_y_max", sy - 1)) + 4, 0, sy - 1)
+	var face_material_for_runtime := func(rid: int, axis: int, dir: int) -> int:
+		return _face_material_id_for_runtime(rid, axis, dir, grass_id, dirt_id, log_id, leaves_id, planks_id, crafting_table_id)
+	var is_runtime_solid := func(rid: int) -> bool:
+		return rid != 0
+
 	var mesh_arrays: Dictionary = KZ_ChunkMeshBuilder.build_mesh_arrays(
 		chunk_origin_world,
 		local_dims,
 		get_block_world,
-		func(rid: int) -> Color:
-			return Color(0.4078, 0.7607, 0.2823, 1.0) if rid == grass_id else Color(1, 1, 1, 1),
-		func(rid: int) -> bool:
-			return rid != 0
+		face_material_for_runtime,
+		is_runtime_solid,
+		mesh_y_max
 	)
 
-	return {"chunk_pos": chunk_pos, "mesh_arrays": mesh_arrays}
+	return {"chunk_pos": chunk_pos, "mesh_arrays": mesh_arrays, "revision": int(payload.get("revision", 0))}
+
+# ----------------------------
+# Material + tree helpers
+# ----------------------------
+
+func _face_material_id_for_runtime(rid: int, axis: int, dir: int, grass_id: int, dirt_id: int, log_id: int, leaves_id: int, planks_id: int, crafting_table_id: int) -> int:
+	if rid == grass_id:
+		if axis == 1 and dir == +1:
+			return 1
+		if axis == 1 and dir == -1:
+			return 2
+		return 0
+	if rid == dirt_id:
+		return 2
+	if rid == log_id:
+		if axis == 1:
+			return 4
+		return 3
+	if rid == leaves_id:
+		return 5
+	if rid == planks_id:
+		return 6
+	if rid == crafting_table_id:
+		if axis == 1 and dir == +1:
+			return 8
+		if axis == 1 and dir == -1:
+			return 6
+		return 7
+	return 2
+
+func _should_place_tree_at_world(wx: int, wz: int, ground_y: int, height_at: Callable, local_seed: int) -> bool:
+	var n: int = wx * 73428767 + wz * 912931 + local_seed * 31
+	n = abs(n)
+	if int(n % 100) >= tree_spawn_chance_percent:
+		return false
+	if abs(int(height_at.call(wx - 1, wz)) - ground_y) > 1:
+		return false
+	if abs(int(height_at.call(wx + 1, wz)) - ground_y) > 1:
+		return false
+	if abs(int(height_at.call(wx, wz - 1)) - ground_y) > 1:
+		return false
+	if abs(int(height_at.call(wx, wz + 1)) - ground_y) > 1:
+		return false
+	return true
+
+func _tree_variant_for_world(wx: int, wz: int, local_seed: int) -> int:
+	var n: int = abs(wx * 19349663 + wz * 83492791 + local_seed * 97)
+	return int(n % 3)
+
+func _tree_trunk_height_for_variant(variant: int) -> int:
+	match variant:
+		0:
+			return 4
+		1:
+			return 5
+		_:
+			return 7
+
+func _tree_has_leaf_offset_variant(variant: int, ox: int, oy: int, oz: int) -> bool:
+	var ax: int = abs(ox)
+	var az: int = abs(oz)
+	match variant:
+		0:
+			match oy:
+				-1:
+					return maxi(ax, az) <= 1
+				0, 1:
+					return maxi(ax, az) <= 2 and not (ax == 2 and az == 2)
+				2:
+					return ax + az <= 1
+				_:
+					return false
+		1:
+			match oy:
+				-1:
+					return maxi(ax, az) <= 1
+				0, 1:
+					return maxi(ax, az) <= 2 and not (ax == 2 and az == 2)
+				2:
+					return ax + az <= 1
+				3:
+					return ax == 0 and az == 0
+				_:
+					return false
+		_:
+			match oy:
+				-2, -1:
+					return maxi(ax, az) <= 1
+				0, 1:
+					return maxi(ax, az) <= 2
+				2:
+					return maxi(ax, az) <= 2 and not (ax == 2 and az == 2)
+				3:
+					return ax + az <= 1
+				4:
+					return ax == 0 and az == 0
+				_:
+					return false
+
+func _tree_has_block_at_variant(variant: int, trunk_x: int, base_y: int, trunk_z: int, wx: int, wy: int, wz: int) -> bool:
+	var trunk_height: int = _tree_trunk_height_for_variant(variant)
+	var canopy_base_y: int = base_y + trunk_height - 2
+	var ox: int = wx - trunk_x
+	var oy: int = wy - canopy_base_y
+	var oz: int = wz - trunk_z
+	return _tree_has_leaf_offset_variant(variant, ox, oy, oz)
+
+func _place_tree_into_voxels(vox: PackedByteArray, sx: int, sy: int, sz: int, base_x: int, base_y: int, base_z: int, log_id: int, leaves_id: int, variant: int = 1) -> void:
+	var idx := func(x: int, y: int, z: int) -> int:
+		return x + z * sx + y * sx * sz
+
+	var trunk_height: int = _tree_trunk_height_for_variant(variant)
+	for dy in range(trunk_height):
+		var y: int = base_y + dy
+		if y >= 0 and y < sy:
+			var li: int = idx.call(base_x, y, base_z)
+			if li >= 0 and li < vox.size():
+				vox[li] = log_id
+
+	if variant == 2:
+		for branch in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var bx: int = base_x + branch.x
+			var bz: int = base_z + branch.y
+			var by: int = base_y + trunk_height - 2
+			if bx >= 0 and bx < sx and bz >= 0 and bz < sz and by >= 0 and by < sy:
+				var bli: int = idx.call(bx, by, bz)
+				if bli >= 0 and bli < vox.size() and vox[bli] == 0:
+					vox[bli] = log_id
+
+	var canopy_base_y: int = base_y + trunk_height - 2
+	var y_min: int = -2 if variant == 2 else -1
+	var y_max: int = 5 if variant == 2 else 4
+	for oy in range(y_min, y_max):
+		for ox in range(-2, 3):
+			for oz in range(-2, 3):
+				if not _tree_has_leaf_offset_variant(variant, ox, oy, oz):
+					continue
+				var x: int = base_x + ox
+				var y: int = canopy_base_y + oy
+				var z: int = base_z + oz
+				if x < 0 or x >= sx or y < 0 or y >= sy or z < 0 or z >= sz:
+					continue
+				var li2: int = idx.call(x, y, z)
+				if li2 < 0 or li2 >= vox.size():
+					continue
+				if vox[li2] == 0:
+					vox[li2] = leaves_id
 
 # ----------------------------
 # Config / helpers
@@ -726,13 +1071,80 @@ func _apply_worldgen(worldgen_cfg: Dictionary) -> void:
 		int(wg.get("chunk_size_z", 16))
 	)
 	view_distance_chunks = int(wg.get("view_distance_chunks", 6))
-	max_worker_threads = int(wg.get("max_worker_threads", 3))
+	max_worker_threads = clampi(int(wg.get("max_worker_threads", 2)), 1, maxi(1, OS.get_processor_count() - 1))
 	cache_max_chunks = int(wg.get("cache_max_chunks", 256))
 
 	world_seed = int(terrain_cfg.get("seed", 1337))
 	terrain_frequency = float(terrain_cfg.get("frequency", 0.008))
 	terrain_base_height = int(terrain_cfg.get("base_height", 64))
 	terrain_height_scale = int(terrain_cfg.get("height_scale", 28))
+	tree_spawn_chance_percent = int(terrain_cfg.get("tree_spawn_chance_percent", tree_spawn_chance_percent))
+	tree_edge_margin = int(terrain_cfg.get("tree_edge_margin", tree_edge_margin))
+	tree_spawn_chance_percent = clampi(tree_spawn_chance_percent, 0, 100)
+	tree_edge_margin = clampi(tree_edge_margin, 2, 6)
+
+
+func save_world_state() -> void:
+	if _chunk_edits_dirty:
+		_save_chunk_edits()
+	var level_path: String = KZ_PathUtil.join(world_root, "level.dat")
+	var txt: String = KZ_PathUtil.read_text(level_path)
+	var parsed_v: Variant = JSON.parse_string(txt)
+	if typeof(parsed_v) == TYPE_DICTIONARY:
+		var parsed: Dictionary = parsed_v as Dictionary
+		parsed["last_played_utc"] = Time.get_datetime_string_from_system(true)
+		KZ_PathUtil.write_text(level_path, JSON.stringify(parsed, "	"))
+
+func _edits_path() -> String:
+	return KZ_PathUtil.join(world_root, "chunks/edits.json")
+
+func _load_chunk_edits() -> void:
+	_chunk_edits.clear()
+	var path: String = _edits_path()
+	if not KZ_PathUtil.file_exists(path):
+		return
+	var txt: String = KZ_PathUtil.read_text(path)
+	var parsed_v: Variant = JSON.parse_string(txt)
+	if typeof(parsed_v) != TYPE_DICTIONARY:
+		return
+	var parsed: Dictionary = parsed_v as Dictionary
+	for key_v in parsed.keys():
+		var key: String = str(key_v)
+		var packed: PackedStringArray = key.split(",", false)
+		if packed.size() != 2:
+			continue
+		if not packed[0].is_valid_int() or not packed[1].is_valid_int():
+			continue
+		var cpos := Vector2i(int(packed[0]), int(packed[1]))
+		var entry_v: Variant = parsed[key]
+		if typeof(entry_v) != TYPE_DICTIONARY:
+			continue
+		var entry: Dictionary = entry_v as Dictionary
+		var edits: Dictionary = {}
+		for li_v in entry.keys():
+			var li_str: String = str(li_v)
+			if not li_str.is_valid_int():
+				continue
+			edits[int(li_str)] = int(entry[li_v])
+		_chunk_edits[cpos] = edits
+
+func _save_chunk_edits() -> void:
+	var out: Dictionary = {}
+	for cpos_v in _chunk_edits.keys():
+		if typeof(cpos_v) != TYPE_VECTOR2I:
+			continue
+		var cpos: Vector2i = cpos_v as Vector2i
+		var edits_v: Variant = _chunk_edits[cpos]
+		if typeof(edits_v) != TYPE_DICTIONARY:
+			continue
+		var edits: Dictionary = edits_v as Dictionary
+		var packed: Dictionary = {}
+		for li_v in edits.keys():
+			packed[str(li_v)] = int(edits[li_v])
+		out["%d,%d" % [cpos.x, cpos.y]] = packed
+	KZ_PathUtil.write_text(_edits_path(), JSON.stringify(out, "	"))
+	_chunk_edits_dirty = false
+	_chunk_edits_save_timer = 0.0
 
 func _load_or_create_world_files() -> void:
 	var seed_path: String = KZ_PathUtil.join(world_root, "seed.dat")

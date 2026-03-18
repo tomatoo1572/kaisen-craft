@@ -9,8 +9,9 @@ static func build_mesh_arrays(
 	chunk_origin_world: Vector3,
 	dims: Vector3i,
 	get_block_world: Callable,
-	get_tint_for_runtime: Callable,
-	is_solid_runtime: Callable
+	get_face_material_id: Callable,
+	is_solid_runtime: Callable,
+	max_mesh_y: int = -1
 ) -> Dictionary:
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
@@ -20,19 +21,23 @@ static func build_mesh_arrays(
 
 	var index_base: int = 0
 
-	index_base = _mesh_dir(0, +1, chunk_origin_world, dims, get_block_world, get_tint_for_runtime, is_solid_runtime,
+	if max_mesh_y < 0:
+		max_mesh_y = dims.y - 1
+	max_mesh_y = clampi(max_mesh_y, 0, dims.y - 1)
+
+	index_base = _mesh_dir(0, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
-	index_base = _mesh_dir(0, -1, chunk_origin_world, dims, get_block_world, get_tint_for_runtime, is_solid_runtime,
+	index_base = _mesh_dir(0, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
 
-	index_base = _mesh_dir(1, +1, chunk_origin_world, dims, get_block_world, get_tint_for_runtime, is_solid_runtime,
+	index_base = _mesh_dir(1, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
-	index_base = _mesh_dir(1, -1, chunk_origin_world, dims, get_block_world, get_tint_for_runtime, is_solid_runtime,
+	index_base = _mesh_dir(1, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
 
-	index_base = _mesh_dir(2, +1, chunk_origin_world, dims, get_block_world, get_tint_for_runtime, is_solid_runtime,
+	index_base = _mesh_dir(2, +1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
-	index_base = _mesh_dir(2, -1, chunk_origin_world, dims, get_block_world, get_tint_for_runtime, is_solid_runtime,
+	index_base = _mesh_dir(2, -1, chunk_origin_world, dims, get_block_world, get_face_material_id, is_solid_runtime, max_mesh_y,
 		vertices, normals, uvs, colors, indices, index_base)
 
 	return {
@@ -49,8 +54,9 @@ static func _mesh_dir(
 	chunk_origin_world: Vector3,
 	dims: Vector3i,
 	get_block_world: Callable,
-	get_tint_for_runtime: Callable,
+	get_face_material_id: Callable,
 	is_solid_runtime: Callable,
+	max_mesh_y: int,
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	uvs: PackedVector2Array,
@@ -70,21 +76,20 @@ static func _mesh_dir(
 	# axis Z: u=X, v=Y, slices over Z
 	if axis == 0:
 		u_size = sz
-		v_size = sy
+		v_size = max_mesh_y + 1
 	elif axis == 1:
 		u_size = sx
 		v_size = sz
 	else:
 		u_size = sx
-		v_size = sy
+		v_size = max_mesh_y + 1
 
 	var mask := PackedInt32Array()
 	mask.resize(u_size * v_size)
 
-	var slice_count: int = sx if axis == 0 else (sy if axis == 1 else sz)
+	var slice_count: int = sx if axis == 0 else ((max_mesh_y + 1) if axis == 1 else sz)
 
 	for s in range(slice_count):
-		# Build mask
 		for v in range(v_size):
 			for u in range(u_size):
 				var bx: int
@@ -127,7 +132,6 @@ static func _mesh_dir(
 				var visible: bool = not bool(is_solid_runtime.call(b))
 				mask[u + v * u_size] = a if visible else 0
 
-		# Greedy merge
 		var v0: int = 0
 		while v0 < v_size:
 			var u0: int = 0
@@ -137,23 +141,27 @@ static func _mesh_dir(
 					u0 += 1
 					continue
 
+				var no_merge: bool = int(get_face_material_id.call(rid, axis, dir)) == 5
+
 				var w: int = 1
-				while (u0 + w) < u_size and mask[(u0 + w) + v0 * u_size] == rid:
-					w += 1
+				if not no_merge:
+					while (u0 + w) < u_size and mask[(u0 + w) + v0 * u_size] == rid:
+						w += 1
 
 				var h: int = 1
-				while (v0 + h) < v_size:
-					var ok: bool = true
-					for k in range(w):
-						if mask[(u0 + k) + (v0 + h) * u_size] != rid:
-							ok = false
+				if not no_merge:
+					while (v0 + h) < v_size:
+						var ok: bool = true
+						for k in range(w):
+							if mask[(u0 + k) + (v0 + h) * u_size] != rid:
+								ok = false
+								break
+						if not ok:
 							break
-					if not ok:
-						break
-					h += 1
+						h += 1
 
 				index_base = _emit_quad(axis, dir, s, u0, v0, w, h, dims, rid,
-					get_tint_for_runtime, vertices, normals, uvs, colors, indices, index_base)
+					get_face_material_id, vertices, normals, uvs, colors, indices, index_base)
 
 				for vv in range(h):
 					for uu in range(w):
@@ -172,9 +180,9 @@ static func _emit_quad(
 	v0: int,
 	w: int,
 	h: int,
-	_dims: Vector3i, # underscore prevents warning-as-error (unused)
+	_dims: Vector3i,
 	runtime_id: int,
-	get_tint_for_runtime: Callable,
+	get_face_material_id: Callable,
 	vertices: PackedVector3Array,
 	normals: PackedVector3Array,
 	uvs: PackedVector2Array,
@@ -182,7 +190,9 @@ static func _emit_quad(
 	indices: PackedInt32Array,
 	index_base: int
 ) -> int:
-	var c: Color = get_tint_for_runtime.call(runtime_id) as Color
+	var face_material_id: int = int(get_face_material_id.call(runtime_id, axis, dir))
+	var encoded: float = clampf(float(face_material_id) / 255.0, 0.0, 1.0)
+	var face_color: Color = Color(encoded, 0.0, 0.0, 1.0)
 
 	var x0: int = 0
 	var x1: int = 0
@@ -238,7 +248,6 @@ static func _emit_quad(
 		p0 = Vector3(x0, y0, z0); p1 = Vector3(x0, y1, z0); p2 = Vector3(x1, y1, z0); p3 = Vector3(x1, y0, z0)
 		n = Vector3(0, 0, -1)
 
-	# Robust winding fix
 	var tri_n: Vector3 = (p1 - p0).cross(p2 - p0)
 	if tri_n.dot(n) < 0.0:
 		var tmp: Vector3 = p1
@@ -253,14 +262,36 @@ static func _emit_quad(
 	vertices.append(p0); vertices.append(p1); vertices.append(p2); vertices.append(p3)
 	normals.append(n); normals.append(n); normals.append(n); normals.append(n)
 
-	uvs.append(Vector2(0, 0))
-	uvs.append(Vector2(0, h))
-	uvs.append(Vector2(w, h))
-	uvs.append(Vector2(w, 0))
+	var quad_points: Array[Vector3] = [p0, p1, p2, p3]
+	for p in quad_points:
+		uvs.append(_face_uv_for_point(axis, dir, p, x0, x1, y0, y1, z0, z1))
 
-	colors.append(c); colors.append(c); colors.append(c); colors.append(c)
+	colors.append(face_color); colors.append(face_color); colors.append(face_color); colors.append(face_color)
 
-	indices.append(i0); indices.append(i1); indices.append(i2)
-	indices.append(i0); indices.append(i2); indices.append(i3)
+	indices.append(i0); indices.append(i2); indices.append(i1)
+	indices.append(i0); indices.append(i3); indices.append(i2)
 
 	return index_base + 4
+
+static func _face_uv_for_point(
+	axis: int,
+	dir: int,
+	p: Vector3,
+	x0: int,
+	x1: int,
+	_y0: int,
+	y1: int,
+	z0: int,
+	z1: int
+) -> Vector2:
+	if axis == 0:
+		if dir == +1:
+			return Vector2(p.z - float(z0), float(y1) - p.y)
+		return Vector2(float(z1) - p.z, float(y1) - p.y)
+	if axis == 1:
+		if dir == +1:
+			return Vector2(p.x - float(x0), p.z - float(z0))
+		return Vector2(p.x - float(x0), float(z1) - p.z)
+	if dir == +1:
+		return Vector2(float(x1) - p.x, float(y1) - p.y)
+	return Vector2(p.x - float(x0), float(y1) - p.y)

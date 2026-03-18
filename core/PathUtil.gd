@@ -56,3 +56,25 @@ static func list_files(user_dir: String, extension: String) -> Array[String]:
 			out.append(join(user_dir, name))
 	d.list_dir_end()
 	return out
+
+
+static func list_dirs(user_dir: String) -> Array[String]:
+	var out: Array[String] = []
+	if not DirAccess.dir_exists_absolute(user_to_abs(user_dir)):
+		return out
+
+	var d: DirAccess = DirAccess.open(user_dir)
+	if d == null:
+		return out
+
+	d.list_dir_begin()
+	while true:
+		var name: String = d.get_next()
+		if name == "":
+			break
+		if name == "." or name == "..":
+			continue
+		if d.current_is_dir():
+			out.append(join(user_dir, name))
+	d.list_dir_end()
+	return out

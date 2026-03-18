@@ -87,23 +87,25 @@ func set_slot_global(g: int, item_id: String, count: int) -> void:
 func clear_slot_global(g: int) -> void:
 	set_slot_global(g, "", 0)
 
-func max_stack_for(_item_id: String) -> int:
+func max_stack_for(item_id: String) -> int:
+	var tree: SceneTree = Engine.get_main_loop() as SceneTree
+	if tree != null:
+		var game_node: Node = tree.root.get_node_or_null("Game")
+		if game_node != null and game_node.has_method("get_stack_size_for_item"):
+			return int(game_node.call("get_stack_size_for_item", item_id))
 	return DEFAULT_MAX_STACK
 
-func add_item(item_id: String, count: int, max_stack: int = DEFAULT_MAX_STACK) -> int:
-	# Returns remainder that could not be added.
+func add_item(item_id: String, count: int, max_stack: int = -1) -> int:
 	var remaining: int = count
 	if remaining <= 0:
 		return 0
+	if max_stack <= 0:
+		max_stack = max_stack_for(item_id)
 
-	# Fill existing stacks (hotbar then inventory).
 	remaining = _fill_existing(hotbar_ids, hotbar_counts, item_id, remaining, max_stack)
 	remaining = _fill_existing(inv_ids, inv_counts, item_id, remaining, max_stack)
-
-	# Use empty slots (hotbar then inventory).
 	remaining = _fill_empty(hotbar_ids, hotbar_counts, item_id, remaining, max_stack)
 	remaining = _fill_empty(inv_ids, inv_counts, item_id, remaining, max_stack)
-
 	return remaining
 
 func consume_selected(amount: int) -> bool:
@@ -142,6 +144,15 @@ func _fill_empty(ids: Array[String], counts: Array[int], item_id: String, remain
 			counts[i] = take
 			r -= take
 	return r
+
+func clear_all() -> void:
+	for i in range(HOTBAR_SIZE):
+		hotbar_ids[i] = ""
+		hotbar_counts[i] = 0
+	for j in range(INV_SIZE):
+		inv_ids[j] = ""
+		inv_counts[j] = 0
+	selected_index = 0
 
 func debug_string() -> String:
 	var s: String = "["

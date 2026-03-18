@@ -1,7 +1,8 @@
 extends Node3D
-class_name KZ_WorldManager
 
-var server: KZ_LocalWorldServer
+const CHUNK_SCRIPT_PATH := "res://world/Chunk.gd"
+
+var server
 var worldgen_cfg: Dictionary = {}
 
 var dims: Vector3i = Vector3i(16, 256, 16)
@@ -13,14 +14,21 @@ var _chunks: Dictionary = {}
 var _requested: Dictionary = {}
 var _retry_after_ms: Dictionary = {}
 
-var request_budget_per_frame: int = 16
-var initial_burst_target_loaded: int = 80
-var initial_burst_budget_per_frame: int = 80
+var request_budget_per_frame: int = 6
+var initial_burst_target_loaded: int = 20
+var initial_burst_budget_per_frame: int = 10
 
 var debug_wireframe: bool = false
-var _mat: StandardMaterial3D
+var _terrain_mat: Material
+var _flora_mat: Material
+var _day_night_tint: Color = Color(1, 1, 1, 1)
+var _sun_dir: Vector3 = Vector3(0.2, 1.0, -0.3).normalized()
+var _moon_dir: Vector3 = Vector3(-0.2, -1.0, 0.3).normalized()
+var _sun_strength: float = 1.0
+var _moon_strength: float = 0.0
+var _ambient_tint: Color = Color(0.7, 0.75, 0.85, 1.0)
 
-func setup(p_server: KZ_LocalWorldServer, p_worldgen_cfg: Dictionary) -> void:
+func setup(p_server, p_worldgen_cfg: Dictionary) -> void:
 	server = p_server
 	worldgen_cfg = p_worldgen_cfg
 
@@ -34,36 +42,99 @@ func setup(p_server: KZ_LocalWorldServer, p_worldgen_cfg: Dictionary) -> void:
 	)
 	view_distance = int(wg.get("view_distance_chunks", 6))
 
-	_mat = StandardMaterial3D.new()
-	_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	_mat.albedo_color = Color(1, 1, 1, 1)
-	_mat.vertex_color_use_as_albedo = false
+	_build_chunk_materials()
 
-	# ✅ Godot 4.6: texture_repeat is a bool (no TEXTURE_REPEAT_* constants)
-	_mat.texture_repeat = true
-
-	# ✅ Fix blur/shimmer:
-	# - Best general choice for voxel pixel-ish textures
-	_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC as BaseMaterial3D.TextureFilter
-	# If you want max crisp (more shimmer when moving), use:
-	# _mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
-
-	# Apply grass texture if defined
-	if server != null and server.registry != null:
-		var rid: int = server.registry.get_runtime_id("kaizencraft:grass")
-		var def: KZ_BlockRegistry.BlockDef = server.registry.get_def_by_runtime(rid)
-		if def != null:
-			var p: String = def.texture_all_path
-			if p != "" and ResourceLoader.exists(p):
-				var tex: Texture2D = load(p) as Texture2D
-				if tex != null:
-					_mat.albedo_texture = tex
-
-	RenderingServer.set_debug_generate_wireframes(true)
+	RenderingServer.set_debug_generate_wireframes(false)
+	if is_inside_tree() and get_viewport() != null:
+		get_viewport().debug_draw = Viewport.DEBUG_DRAW_DISABLED as Viewport.DebugDraw
 
 	if server != null and not server.chunk_mesh_updated.is_connected(Callable(self, "_on_server_chunk_mesh_updated")):
 		server.chunk_mesh_updated.connect(Callable(self, "_on_server_chunk_mesh_updated"))
+
+func _build_chunk_materials() -> void:
+	_terrain_mat = _build_shader_material("res://assets/shaders/terrain_grass.gdshader")
+	_flora_mat = _build_shader_material("res://assets/shaders/terrain_flora.gdshader")
+
+	if _terrain_mat == null:
+		var terrain_fallback := StandardMaterial3D.new()
+		terrain_fallback.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		terrain_fallback.cull_mode = BaseMaterial3D.CULL_BACK
+		terrain_fallback.albedo_color = Color(1, 1, 1, 1)
+		terrain_fallback.vertex_color_use_as_albedo = true
+		terrain_fallback.texture_repeat = true
+		terrain_fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
+		_terrain_mat = terrain_fallback
+
+	if _flora_mat == null:
+		var flora_fallback := StandardMaterial3D.new()
+		flora_fallback.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		flora_fallback.cull_mode = BaseMaterial3D.CULL_BACK
+		flora_fallback.albedo_color = Color(1, 1, 1, 1)
+		flora_fallback.vertex_color_use_as_albedo = true
+		flora_fallback.texture_repeat = true
+		flora_fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
+		_flora_mat = flora_fallback
+
+func _build_shader_material(shader_path: String) -> Material:
+	var shader_res: Shader = load(shader_path) as Shader
+	if shader_res == null:
+		return null
+
+	var mat := ShaderMaterial.new()
+	mat.shader = shader_res
+	mat.set_shader_parameter("grass_side_tex", _load_tex("res://assets/textures/blocks/grass.png"))
+	mat.set_shader_parameter("grass_top_tex", _load_tex("res://assets/textures/blocks/grass_top.png"))
+	mat.set_shader_parameter("dirt_tex", _load_tex("res://assets/textures/blocks/dirt.png"))
+	mat.set_shader_parameter("log_side_tex", _load_tex("res://assets/textures/blocks/oak_log.png"))
+	mat.set_shader_parameter("log_top_tex", _load_tex("res://assets/textures/blocks/oak_log_top.png"))
+	mat.set_shader_parameter("leaves_tex", _load_tex("res://assets/textures/blocks/oak_leaves.png"))
+	mat.set_shader_parameter("oak_planks_tex", _load_tex("res://assets/textures/blocks/oak_planks.png"))
+	mat.set_shader_parameter("crafting_table_side_tex", _load_tex("res://assets/textures/blocks/crafting_table_side.png"))
+	mat.set_shader_parameter("crafting_table_top_tex", _load_tex("res://assets/textures/blocks/crafting_table_top.png"))
+	mat.set_shader_parameter("day_night_tint", Vector3(_day_night_tint.r, _day_night_tint.g, _day_night_tint.b))
+	mat.set_shader_parameter("sun_dir", _sun_dir)
+	mat.set_shader_parameter("moon_dir", _moon_dir)
+	mat.set_shader_parameter("sun_strength", _sun_strength)
+	mat.set_shader_parameter("moon_strength", _moon_strength)
+	mat.set_shader_parameter("ambient_tint", Vector3(_ambient_tint.r, _ambient_tint.g, _ambient_tint.b))
+	return mat
+
+func _load_tex(path: String) -> Texture2D:
+	if path == "" or not ResourceLoader.exists(path):
+		return null
+	return load(path) as Texture2D
+
+
+func set_day_night_tint(tint: Color) -> void:
+	_day_night_tint = tint
+	_apply_material_tint(_terrain_mat, tint)
+	_apply_material_tint(_flora_mat, tint)
+
+func _apply_material_tint(mat: Material, tint: Color) -> void:
+	if mat == null:
+		return
+	if mat is ShaderMaterial:
+		var sm: ShaderMaterial = mat as ShaderMaterial
+		sm.set_shader_parameter("day_night_tint", Vector3(tint.r, tint.g, tint.b))
+		sm.set_shader_parameter("sun_dir", _sun_dir)
+		sm.set_shader_parameter("moon_dir", _moon_dir)
+		sm.set_shader_parameter("sun_strength", _sun_strength)
+		sm.set_shader_parameter("moon_strength", _moon_strength)
+		sm.set_shader_parameter("ambient_tint", Vector3(_ambient_tint.r, _ambient_tint.g, _ambient_tint.b))
+	elif mat is BaseMaterial3D:
+		(mat as BaseMaterial3D).albedo_color = tint
+
+func set_celestial_lighting(sun_dir: Vector3, moon_dir: Vector3, sun_strength: float, moon_strength: float, ambient: Color) -> void:
+	_sun_dir = sun_dir
+	_moon_dir = moon_dir
+	_sun_strength = sun_strength
+	_moon_strength = moon_strength
+	_ambient_tint = ambient
+	_apply_material_tint(_terrain_mat, _day_night_tint)
+	_apply_material_tint(_flora_mat, _day_night_tint)
+
+func set_view_distance(chunks: int) -> void:
+	view_distance = clampi(chunks, 2, 16)
 
 func set_player(p: Node3D) -> void:
 	player = p
@@ -72,6 +143,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.is_pressed() and not event.is_echo():
 		if event.keycode == KEY_F3:
 			debug_wireframe = not debug_wireframe
+			RenderingServer.set_debug_generate_wireframes(debug_wireframe)
 			if debug_wireframe:
 				get_viewport().debug_draw = Viewport.DEBUG_DRAW_WIREFRAME as Viewport.DebugDraw
 			else:
@@ -105,9 +177,7 @@ func _process(_dt: float) -> void:
 
 		to_request.append(c)
 
-	to_request.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return a.distance_squared_to(pc) < b.distance_squared_to(pc)
-	)
+	_sort_chunk_positions_by_distance(to_request, pc)
 
 	var budget: int = request_budget_per_frame
 	if _chunks.size() < initial_burst_target_loaded:
@@ -132,7 +202,7 @@ func _process(_dt: float) -> void:
 			to_unload.append(c2)
 
 	for c3 in to_unload:
-		var ch: KZ_Chunk = _chunks[c3] as KZ_Chunk
+		var ch: Node = _chunks[c3] as Node
 		_chunks.erase(c3)
 		if ch != null:
 			ch.queue_free()
@@ -167,7 +237,16 @@ func _on_chunk_ready(result: Dictionary) -> void:
 		return
 	var arrays: Dictionary = arrays_v as Dictionary
 
-	var ch := KZ_Chunk.new()
+	var chunk_script: Script = load(CHUNK_SCRIPT_PATH) as Script
+	if chunk_script == null:
+		push_error("Failed to load Chunk script: %s" % CHUNK_SCRIPT_PATH)
+		return
+
+	var ch: Variant = chunk_script.new()
+	if ch == null:
+		push_error("Failed to instantiate Chunk from: %s" % CHUNK_SCRIPT_PATH)
+		return
+
 	ch.set_chunk_pos(cpos)
 	ch.position = origin
 	add_child(ch)
@@ -178,23 +257,103 @@ func _on_chunk_ready(result: Dictionary) -> void:
 func _on_server_chunk_mesh_updated(chunk_pos: Vector2i, mesh_arrays: Dictionary) -> void:
 	if not _chunks.has(chunk_pos):
 		return
-	var ch: KZ_Chunk = _chunks[chunk_pos] as KZ_Chunk
+	var ch: Node = _chunks[chunk_pos] as Node
 	if ch == null:
 		return
 	ch.set_mesh(_make_mesh(mesh_arrays))
 
 func _make_mesh(arrays: Dictionary) -> ArrayMesh:
 	var mesh := ArrayMesh.new()
+	var verts_v: Variant = arrays.get("vertices")
+	if typeof(verts_v) != TYPE_PACKED_VECTOR3_ARRAY:
+		return mesh
+
+	var verts: PackedVector3Array = verts_v as PackedVector3Array
+	if verts.is_empty():
+		return mesh
+
+	var normals: PackedVector3Array = arrays.get("normals", PackedVector3Array()) as PackedVector3Array
+	var uvs: PackedVector2Array = arrays.get("uvs", PackedVector2Array()) as PackedVector2Array
+	var colors: PackedColorArray = arrays.get("colors", PackedColorArray()) as PackedColorArray
+
+	var src_indices: PackedInt32Array = arrays.get("indices", PackedInt32Array()) as PackedInt32Array
+
+	var terrain := _split_surface_arrays(verts, normals, uvs, colors, src_indices, false)
+	var flora := _split_surface_arrays(verts, normals, uvs, colors, src_indices, true)
+
+	if not (terrain[Mesh.ARRAY_VERTEX] as PackedVector3Array).is_empty():
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, terrain)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, _terrain_mat)
+
+	if not (flora[Mesh.ARRAY_VERTEX] as PackedVector3Array).is_empty():
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, flora)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, _flora_mat)
+
+	return mesh
+
+func _split_surface_arrays(
+	verts: PackedVector3Array,
+	normals: PackedVector3Array,
+	uvs: PackedVector2Array,
+	colors: PackedColorArray,
+	src_indices: PackedInt32Array,
+	flora_only: bool
+) -> Array:
+	var out_verts := PackedVector3Array()
+	var out_normals := PackedVector3Array()
+	var out_uvs := PackedVector2Array()
+	var out_colors := PackedColorArray()
+	var out_indices := PackedInt32Array()
+
+	var quad_count: int = int(float(verts.size()) / 4.0)
+	for q in range(quad_count):
+		var src_i: int = q * 4
+		if src_i >= colors.size():
+			break
+		var face_id: int = int(round(colors[src_i].r * 255.0))
+		# Only leaves should use the flora surface/material.
+		# Logs belong on the solid terrain surface so they render like full blocks.
+		var is_flora: bool = face_id == 5
+		if is_flora != flora_only:
+			continue
+
+		var base: int = out_verts.size()
+		for k in range(4):
+			var si: int = src_i + k
+			out_verts.append(verts[si])
+			if si < normals.size():
+				out_normals.append(normals[si])
+			if si < uvs.size():
+				out_uvs.append(uvs[si])
+			if si < colors.size():
+				out_colors.append(colors[si])
+
+		var src_index_base: int = q * 6
+		if src_indices.size() >= src_index_base + 6:
+			for kk in range(6):
+				out_indices.append(base + int(src_indices[src_index_base + kk]) - src_i)
+		else:
+			out_indices.append(base)
+			out_indices.append(base + 1)
+			out_indices.append(base + 2)
+			out_indices.append(base)
+			out_indices.append(base + 2)
+			out_indices.append(base + 3)
+
 	var a := []
 	a.resize(Mesh.ARRAY_MAX)
-	a[Mesh.ARRAY_VERTEX] = arrays["vertices"]
-	a[Mesh.ARRAY_NORMAL] = arrays["normals"]
-	a[Mesh.ARRAY_TEX_UV] = arrays["uvs"]
-	a[Mesh.ARRAY_COLOR] = arrays["colors"]
-	a[Mesh.ARRAY_INDEX] = arrays["indices"]
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
-	mesh.surface_set_material(0, _mat)
-	return mesh
+	a[Mesh.ARRAY_VERTEX] = out_verts
+	a[Mesh.ARRAY_NORMAL] = out_normals
+	a[Mesh.ARRAY_TEX_UV] = out_uvs
+	a[Mesh.ARRAY_COLOR] = out_colors
+	a[Mesh.ARRAY_INDEX] = out_indices
+	return a
+
+func _sort_chunk_positions_by_distance(list_in: Array[Vector2i], center: Vector2i) -> void:
+	list_in.sort_custom(_compare_chunk_distance.bind(center))
+
+func _compare_chunk_distance(a: Vector2i, b: Vector2i, center: Vector2i) -> bool:
+	return a.distance_squared_to(center) < b.distance_squared_to(center)
 
 func _world_to_chunk(pos: Vector3) -> Vector2i:
 	var cx: int = int(floor(pos.x / float(dims.x)))
