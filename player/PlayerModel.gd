@@ -3,6 +3,7 @@ extends Node3D
 const MALE_DEFAULT_MODEL_PATH := "res://assets/models/player/male/default/kaizencraftplayer.glb"
 const FEMALE_DEFAULT_MODEL_PATH := "res://assets/models/player/female/default/kaizencraftplayer.glb"
 const TARGET_PLAYER_HEIGHT_BLOCKS := 1.8
+const DEFAULT_EYE_HEIGHT_RATIO := 0.91
 
 const BODY_PART_ALIASES := {
 	"hip": ["hip"],
@@ -50,7 +51,9 @@ var current_model_path: String = ""
 var _body_part_base_scales: Dictionary = {}
 var _base_fit_scale: float = 1.0
 var _first_person_body_visible: bool = false
-
+var _cached_local_aabb: AABB = AABB(Vector3.ZERO, Vector3.ZERO)
+var _cached_eye_height: float = 1.56
+var _cached_focus_height: float = 1.42
 
 func _ready() -> void:
 	if appearance_profile == null:
@@ -158,15 +161,24 @@ func apply_profile() -> void:
 	var root_scale: Vector3 = Vector3(_base_fit_scale * width_scale, _base_fit_scale * height_scale, _base_fit_scale * width_scale)
 	model_asset_root.scale = root_scale
 	_recenter_model_to_origin()
+	_update_cached_camera_metrics()
 	set_first_person_hidden(first_person_hidden)
 
 func set_look_pitch(pitch_radians: float) -> void:
 	var head_node: Node3D = body_parts.get("head", null) as Node3D
 	if head_node != null:
 		head_node.rotation.x = clampf(-pitch_radians * 0.55, deg_to_rad(-50.0), deg_to_rad(40.0))
-	var torso_node: Node3D = body_parts.get("torso_upper", null) as Node3D
-	if torso_node != null:
-		torso_node.rotation.x = clampf(-pitch_radians * 0.14, deg_to_rad(-12.0), deg_to_rad(12.0))
+
+	# Keep the body stable in first and third person. Only the head should track pitch.
+	var torso_upper_node: Node3D = body_parts.get("torso_upper", null) as Node3D
+	if torso_upper_node != null:
+		torso_upper_node.rotation.x = 0.0
+	var torso_lower_node: Node3D = body_parts.get("torso_lower", null) as Node3D
+	if torso_lower_node != null:
+		torso_lower_node.rotation.x = 0.0
+	var waist_node: Node3D = body_parts.get("waist", null) as Node3D
+	if waist_node != null:
+		waist_node.rotation.x = 0.0
 
 func set_first_person_hidden(hidden: bool) -> void:
 	first_person_hidden = hidden
@@ -175,25 +187,94 @@ func set_first_person_hidden(hidden: bool) -> void:
 	if hidden and _first_person_body_visible:
 		model_scene_root.visible = true
 		_set_head_visibility(false)
+		# Keep the lower body visible from a believable eye line and hide the upper torso that would clip the camera.
+		_set_part_visibility("torso_upper", false)
+		_set_part_visibility("torso_lower", true)
+		_set_part_visibility("waist", true)
+		_set_part_visibility("arm_upper_l", false)
+		_set_part_visibility("arm_upper_r", false)
+		_set_part_visibility("arm_lower_l", true)
+		_set_part_visibility("arm_lower_r", true)
+		_set_part_visibility("hand_l", true)
+		_set_part_visibility("hand_r", true)
+		_set_part_visibility("leg_upper_l", true)
+		_set_part_visibility("leg_upper_r", true)
+		_set_part_visibility("leg_lower_l", true)
+		_set_part_visibility("leg_lower_r", true)
+		_set_part_visibility("foot_l", true)
+		_set_part_visibility("foot_r", true)
 	else:
 		model_scene_root.visible = not hidden
 		_set_head_visibility(true)
+		_set_part_visibility("torso_upper", true)
+		_set_part_visibility("torso_lower", true)
+		_set_part_visibility("waist", true)
 
 func set_first_person_body_visible(enabled: bool) -> void:
 	_first_person_body_visible = enabled
 	set_first_person_hidden(first_person_hidden)
 
+func get_first_person_camera_height() -> float:
+	return _cached_eye_height * _get_profile_float("height_scale", 1.0)
+
+func get_third_person_focus_height() -> float:
+	return _cached_focus_height * _get_profile_float("height_scale", 1.0)
+
+func get_visual_height_blocks() -> float:
+	return TARGET_PLAYER_HEIGHT_BLOCKS * _get_profile_float("height_scale", 1.0)
+
+func get_current_local_aabb() -> AABB:
+	if model_scene_root == null:
+		return AABB(Vector3.ZERO, Vector3.ZERO)
+	return _compute_combined_local_aabb(model_scene_root)
+
+func get_current_body_height() -> float:
+	var aabb: AABB = get_current_local_aabb()
+	return aabb.size.y
+
+func get_current_body_width() -> float:
+	var aabb: AABB = get_current_local_aabb()
+	return maxf(aabb.size.x, aabb.size.z)
+
+func get_first_person_eye_height() -> float:
+	var body_height: float = get_visual_height_blocks()
+	return clampf(body_height * 0.90, 1.56, 1.68)
+
+func get_first_person_forward_offset() -> float:
+	var aabb: AABB = get_current_local_aabb()
+	if aabb.size == Vector3.ZERO:
+		return 0.05
+	return maxf(0.04, aabb.size.z * 0.05)
+
+func get_first_person_visual_offset() -> Vector3:
+	var aabb: AABB = get_current_local_aabb()
+	if aabb.size == Vector3.ZERO:
+		return Vector3(0.0, -0.72, -0.18)
+	var down_offset: float = clampf(aabb.size.y * 0.42, 0.68, 0.92)
+	var back_offset: float = clampf(aabb.size.z * 0.18, 0.14, 0.22)
+	# Push the body down and back so the camera is at a real eye point above the chest.
+	return Vector3(0.0, -down_offset, -back_offset)
+
+func get_third_person_pivot_height() -> float:
+	var aabb: AABB = get_current_local_aabb()
+	if aabb.size == Vector3.ZERO:
+		return 1.42
+	return aabb.position.y + aabb.size.y * 0.78
+
 func _set_head_visibility(visible_value: bool) -> void:
-	var head_node: Node3D = body_parts.get("head", null) as Node3D
-	if head_node == null:
+	_set_part_visibility("head", visible_value)
+
+func _set_part_visibility(part_name: String, visible_value: bool) -> void:
+	var node: Node3D = body_parts.get(part_name, null) as Node3D
+	if node == null:
 		return
-	head_node.visible = visible_value
-	for child in head_node.get_children():
+	node.visible = visible_value
+	for child in node.get_children():
 		if child is Node3D:
 			(child as Node3D).visible = visible_value
 
-func get_body_part(name: String) -> Node3D:
-	return body_parts.get(name, null) as Node3D
+func get_body_part(part_name: String) -> Node3D:
+	return body_parts.get(part_name, null) as Node3D
 
 func get_clothing_anchor(slot_name: String) -> Node3D:
 	return clothing_anchors.get(slot_name, null) as Node3D
@@ -254,6 +335,7 @@ func _reload_model(model_path: String) -> void:
 	_refresh_base_fit_scale()
 	model_asset_root.scale = Vector3.ONE * _base_fit_scale
 	_recenter_model_to_origin()
+	_update_cached_camera_metrics()
 	apply_profile()
 
 func _register_body_parts() -> void:
@@ -283,15 +365,15 @@ func _find_best_node_match(nodes: Array, aliases: Array) -> Node3D:
 		var node: Node3D = node_v as Node3D
 		if node == null:
 			continue
-		var norm_name: String = _normalize_name(node.name)
+		var norm_node_name: String = _normalize_name(node.name)
 		var score: int = -1000
 		for alias_v in aliases:
 			var alias: String = _normalize_name(str(alias_v))
-			if norm_name == alias:
+			if norm_node_name == alias:
 				score = max(score, 100)
-			elif norm_name.begins_with(alias):
+			elif norm_node_name.begins_with(alias):
 				score = max(score, 60)
-			elif alias in norm_name:
+			elif alias in norm_node_name:
 				score = max(score, 40)
 		if score < 0:
 			continue
@@ -306,19 +388,29 @@ func _find_best_node_match(nodes: Array, aliases: Array) -> Node3D:
 			best = node
 	return best
 
-
 func _refresh_base_fit_scale() -> void:
 	if model_asset_root == null:
 		_base_fit_scale = 1.0
+		_cached_local_aabb = AABB(Vector3.ZERO, Vector3.ZERO)
 		return
-	var aabb: AABB = _compute_combined_local_aabb(model_asset_root)
-	if aabb.size.y <= 0.0001:
+	_cached_local_aabb = _compute_combined_local_aabb(model_asset_root)
+	if _cached_local_aabb.size.y <= 0.0001:
 		_base_fit_scale = 1.0
 		return
-	_base_fit_scale = TARGET_PLAYER_HEIGHT_BLOCKS / aabb.size.y
+	_base_fit_scale = TARGET_PLAYER_HEIGHT_BLOCKS / _cached_local_aabb.size.y
 
-func _normalize_name(name: String) -> String:
-	return name.to_lower().replace(" ", "").replace("_", "")
+func _update_cached_camera_metrics() -> void:
+	if _cached_local_aabb.size.y <= 0.0001:
+		_cached_eye_height = 1.56
+		_cached_focus_height = 1.42
+		return
+	var base_eye_height: float = (_cached_local_aabb.position.y + _cached_local_aabb.size.y * DEFAULT_EYE_HEIGHT_RATIO) * _base_fit_scale
+	var base_focus_height: float = (_cached_local_aabb.position.y + _cached_local_aabb.size.y * 0.79) * _base_fit_scale
+	_cached_eye_height = maxf(1.44, base_eye_height)
+	_cached_focus_height = maxf(1.28, base_focus_height)
+
+func _normalize_name(node_name: String) -> String:
+	return node_name.to_lower().replace(" ", "").replace("_", "")
 
 func _create_clothing_anchors() -> void:
 	for slot_name in clothing_anchors.keys():
@@ -384,29 +476,36 @@ func _recenter_model_to_origin() -> void:
 	model_asset_root.position = Vector3(-center_x, -aabb.position.y, -center_z)
 
 func _compute_combined_local_aabb(root_node: Node3D) -> AABB:
-	var has_any: bool = false
-	var combined: AABB = AABB(Vector3.ZERO, Vector3.ZERO)
-	var root_inverse: Transform3D = root_node.global_transform.affine_inverse()
-	var meshes: Array = []
-	_collect_meshes(root_node, meshes)
-	for mesh_v in meshes:
-		var mesh_instance: MeshInstance3D = mesh_v as MeshInstance3D
-		if mesh_instance == null or mesh_instance.mesh == null:
-			continue
-		var local_box: AABB = mesh_instance.get_aabb()
-		var transformed_box: AABB = _transform_aabb(root_inverse * mesh_instance.global_transform, local_box)
-		if not has_any:
-			combined = transformed_box
-			has_any = true
-		else:
-			combined = combined.merge(transformed_box)
-	return combined if has_any else AABB(Vector3.ZERO, Vector3.ZERO)
+	var result: Dictionary = _compute_local_aabb_recursive(root_node, Transform3D.IDENTITY)
+	if bool(result.get("has_any", false)):
+		var result_aabb_v: Variant = result.get("aabb", AABB(Vector3.ZERO, Vector3.ZERO))
+		if typeof(result_aabb_v) == TYPE_AABB:
+			return result_aabb_v
+	return AABB(Vector3.ZERO, Vector3.ZERO)
 
-func _collect_meshes(node: Node, out_meshes: Array) -> void:
+func _compute_local_aabb_recursive(node: Node3D, parent_xform: Transform3D) -> Dictionary:
+	var combined: AABB = AABB(Vector3.ZERO, Vector3.ZERO)
+	var has_any: bool = false
+	var local_xform: Transform3D = parent_xform * node.transform
 	if node is MeshInstance3D:
-		out_meshes.append(node)
+		var mesh_instance: MeshInstance3D = node as MeshInstance3D
+		if mesh_instance != null and mesh_instance.mesh != null:
+			combined = _transform_aabb(local_xform, mesh_instance.get_aabb())
+			has_any = true
 	for child in node.get_children():
-		_collect_meshes(child, out_meshes)
+		if child is Node3D:
+			var child_result: Dictionary = _compute_local_aabb_recursive(child as Node3D, local_xform)
+			if bool(child_result.get("has_any", false)):
+				var child_aabb_v: Variant = child_result.get("aabb", AABB(Vector3.ZERO, Vector3.ZERO))
+				if typeof(child_aabb_v) != TYPE_AABB:
+					continue
+				var child_aabb: AABB = child_aabb_v
+				if not has_any:
+					combined = child_aabb
+					has_any = true
+				else:
+					combined = combined.merge(child_aabb)
+	return {"has_any": has_any, "aabb": combined}
 
 func _transform_aabb(xform: Transform3D, source: AABB) -> AABB:
 	var corners: Array = [
@@ -422,8 +521,8 @@ func _transform_aabb(xform: Transform3D, source: AABB) -> AABB:
 	var first: bool = true
 	var min_v: Vector3 = Vector3.ZERO
 	var max_v: Vector3 = Vector3.ZERO
-	for corner in corners:
-		var p: Vector3 = xform * corner
+	for corner_v in corners:
+		var p: Vector3 = xform * corner_v
 		if first:
 			first = false
 			min_v = p

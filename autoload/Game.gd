@@ -44,19 +44,34 @@ var hud: KZ_Hud
 
 var is_session_active: bool = false
 
-var day_duration_sec: float = 15.0 * 60.0
-var night_duration_sec: float = 20.0 * 60.0
+var day_duration_sec: float = 14.0 * 60.0
+var night_duration_sec: float = 10.0 * 60.0
 var _time_of_day_sec: float = 0.0
 var _day_count: int = 0
+var time_speed_multiplier: float = 1.0
+var max_time_speed_multiplier: float = 240.0
+var animals_root: Node3D
 
 var world_environment: WorldEnvironment
 var environment_resource: Environment
+var sky_material_resource: ProceduralSkyMaterial
 var sun_light: DirectionalLight3D
 var moon_light: DirectionalLight3D
 var sky_anchor: Node3D
 var sun_sprite: Sprite3D
 var moon_sprite: Sprite3D
 var moon_phase_textures: Array[Texture2D] = []
+var cloud_root: Node3D
+var cloud_sprites: Array = []
+var cloud_base_positions: Array[Vector3] = []
+var cloud_scroll_speed: float = 2.4
+var _sky_color_current: Color = Color(0.58, 0.80, 1.0)
+var _ambient_color_current: Color = Color(0.90, 0.92, 0.98)
+var _terrain_tint_current: Color = Color(1.0, 1.0, 1.0)
+var _sun_dir_current: Vector3 = Vector3(0.25, 1.0, -0.28).normalized()
+var _moon_dir_current: Vector3 = Vector3(-0.25, 1.0, 0.24).normalized()
+var _sun_strength_current: float = 1.0
+var _moon_strength_current: float = 0.0
 var keep_inventory_enabled: bool = false
 var game_mode: String = "survival"
 var _recipe_cache: Array[Dictionary] = []
@@ -77,7 +92,7 @@ func _notification(what: int) -> void:
 func _process(dt: float) -> void:
 	if not is_session_active or world_manager == null:
 		return
-	_update_day_night(dt)
+	_update_day_night(dt * time_speed_multiplier)
 
 func start_singleplayer(p_instance_name: String = "default", p_world_name: String = "world1") -> bool:
 	if is_session_active:
@@ -157,6 +172,9 @@ func start_singleplayer(p_instance_name: String = "default", p_world_name: Strin
 	hud = KZ_Hud.new()
 	scene.add_child(hud)
 	hud.setup(player, block_registry)
+
+	_setup_animals(scene)
+	_spawn_initial_sheep(6)
 
 	if not server.block_broken.is_connected(Callable(self, "_on_block_broken")):
 		server.block_broken.connect(Callable(self, "_on_block_broken"))
@@ -493,12 +511,20 @@ func _run_command(raw: String) -> void:
 		_post_system("Took %.1f damage. Health: %d / %d" % [amount, int(round(player.health)), int(round(player.max_health))])
 		return
 	if cmd == "time":
+		if parts.size() >= 3 and parts[1].to_lower() == "speed":
+			var speed_text: String = parts[2].strip_edges()
+			if not speed_text.is_valid_float() and not speed_text.is_valid_int():
+				_post_system("Usage: /time speed <multiplier>")
+				return
+			set_time_speed_multiplier(float(speed_text))
+			_post_system("Time speed set to %.2fx." % time_speed_multiplier)
+			return
 		if parts.size() >= 3 and parts[1].to_lower() == "set":
 			var label: String = parts[2].to_lower()
 			if set_time_preset(label):
 				_post_system("Set time to %s." % label)
 			else:
-				_post_system("Usage: /time set morning|day|noon|afternoon|evening|night|midnight")
+				_post_system("Usage: /time set morning|day|noon|afternoon|evening|night|midnight OR /time speed <multiplier>")
 			return
 		_post_system("Usage: /time set morning|day|noon|afternoon|evening|night|midnight")
 		return
@@ -620,72 +646,172 @@ func _run_command(raw: String) -> void:
 
 func get_time_display_text() -> String:
 	var info: Dictionary = get_time_display_info()
-	var elapsed_min: float = float(info.get("elapsed_minutes", 0.0))
-	var total_min: float = float(info.get("total_minutes", 0.0))
-	var label: String = str(info.get("label", "Day"))
-	return "%.1f/%.1f %s" % [elapsed_min, total_min, label]
+	return "%s %s" % [str(info.get("clock_text", "00:00")), str(info.get("label", "Day"))]
+
+func _cycle_to_clock_hour(time_sec: float) -> float:
+	var total_cycle: float = day_duration_sec + night_duration_sec
+	if total_cycle <= 0.0:
+		return 0.0
+	return fmod((time_sec / total_cycle) * 24.0, 24.0)
+
+func _clock_hour_to_cycle_seconds(hour_value: float) -> float:
+	var total_cycle: float = day_duration_sec + night_duration_sec
+	if total_cycle <= 0.0:
+		return 0.0
+	var hour_norm: float = fmod(hour_value, 24.0)
+	if hour_norm < 0.0:
+		hour_norm += 24.0
+	return (hour_norm / 24.0) * total_cycle
 
 func get_time_display_info() -> Dictionary:
 	var total_cycle: float = day_duration_sec + night_duration_sec
-	var sunrise: float = night_duration_sec * 0.5
-	var sunset: float = sunrise + day_duration_sec
+	if total_cycle <= 0.0:
+		return {"clock_text": "00:00", "label": "Day", "hour": 0, "minute": 0}
 	var time_sec: float = fmod(_time_of_day_sec, total_cycle)
 	if time_sec < 0.0:
 		time_sec += total_cycle
-	if time_sec >= sunrise and time_sec < sunset:
-		var day_sec: float = time_sec - sunrise
-		var day_t: float = day_sec / maxf(day_duration_sec, 0.001)
-		var label: String = "Day"
-		if day_t < 0.18:
-			label = "Morning"
-		elif day_t < 0.42:
-			label = "Day"
-		elif day_t < 0.58:
-			label = "Noon"
-		elif day_t < 0.82:
-			label = "Afternoon"
-		else:
-			label = "Evening"
-		return {"label": label, "elapsed_minutes": day_sec / 60.0, "total_minutes": day_duration_sec / 60.0, "is_day": true}
-	var night_elapsed: float = time_sec - sunset
-	if night_elapsed < 0.0:
-		night_elapsed += total_cycle
-	var night_t: float = night_elapsed / maxf(night_duration_sec, 0.001)
-	var night_label: String = "Night"
-	if night_t >= 0.35 and night_t <= 0.65:
-		night_label = "Midnight"
-	return {"label": night_label, "elapsed_minutes": night_elapsed / 60.0, "total_minutes": night_duration_sec / 60.0, "is_day": false}
+	var clock_hour_f: float = _cycle_to_clock_hour(time_sec)
+	var hour_int: int = int(floor(clock_hour_f))
+	var minute_int: int = int(floor((clock_hour_f - float(hour_int)) * 60.0))
+	if minute_int >= 60:
+		minute_int = 0
+		hour_int = (hour_int + 1) % 24
+	var label: String = "Night"
+	if clock_hour_f >= 5.0 and clock_hour_f < 8.0:
+		label = "Morning"
+	elif clock_hour_f >= 8.0 and clock_hour_f < 12.0:
+		label = "Day"
+	elif clock_hour_f >= 12.0 and clock_hour_f < 17.0:
+		label = "Afternoon"
+	elif clock_hour_f >= 17.0 and clock_hour_f < 19.0:
+		label = "Evening"
+	elif clock_hour_f >= 19.0 or clock_hour_f < 5.0:
+		label = "Night"
+	if hour_int == 0:
+		label = "Midnight"
+	elif hour_int == 12:
+		label = "Noon"
+	return {
+		"clock_text": "%02d:%02d" % [hour_int, minute_int],
+		"label": label,
+		"hour": hour_int,
+		"minute": minute_int,
+		"hour_f": clock_hour_f,
+		"is_day": clock_hour_f >= 7.0 and clock_hour_f < 19.0
+	}
+
+func set_time_speed_multiplier(multiplier: float) -> void:
+	time_speed_multiplier = clampf(multiplier, 0.0, max_time_speed_multiplier)
+
+func get_player_attack_damage() -> float:
+
+	if player == null or block_registry == null:
+		return 0.5
+	var selected_id: String = player.inventory.get_selected_id()
+	if selected_id == "":
+		return 0.5
+	return block_registry.get_attack_damage_for_item(selected_id, 0.5)
+
+func try_attack_entity_from_player(attacker: Node3D) -> bool:
+	if attacker == null:
+		return false
+	var scene: Node = get_tree().current_scene
+	if scene == null:
+		scene = get_tree().root
+	if scene == null:
+		return false
+	var cam: Camera3D = null
+	if attacker.has_method("get"):
+		var cam_v: Variant = attacker.get("cam")
+		if cam_v is Camera3D:
+			cam = cam_v as Camera3D
+	var origin: Vector3 = cam.global_position if cam != null else attacker.global_position + Vector3(0.0, 1.6, 0.0)
+	var dir: Vector3 = -attacker.global_transform.basis.z
+	if cam != null:
+		dir = -cam.global_transform.basis.z
+	var best: Node = null
+	var best_dist: float = 99999.0
+	for node in scene.get_tree().get_nodes_in_group("kz_damageable"):
+		if not (node is Node3D):
+			continue
+		var n3: Node3D = node as Node3D
+		var to_target: Vector3 = n3.global_position - origin
+		var along: float = to_target.dot(dir)
+		if along < 0.0 or along > 4.5:
+			continue
+		var closest: Vector3 = origin + dir * along
+		var radius: float = 0.85
+		if n3.has_method("get_target_radius"):
+			radius = float(n3.call("get_target_radius"))
+		if n3.global_position.distance_to(closest) <= radius and along < best_dist:
+			best = n3
+			best_dist = along
+	if best != null and best.has_method("take_damage"):
+		best.call("take_damage", get_player_attack_damage(), attacker)
+		return true
+	return false
+
+func _setup_animals(scene: Node) -> void:
+	if animals_root != null:
+		animals_root.queue_free()
+	animals_root = Node3D.new()
+	animals_root.name = "Animals"
+	scene.add_child(animals_root)
+
+func _spawn_initial_sheep(count: int) -> void:
+	if animals_root == null or server == null:
+		return
+	var sheep_script: Script = load("res://world/Sheep.gd") as Script
+	if sheep_script == null:
+		return
+	var base: Vector3 = server.get_spawn_position()
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(Time.get_ticks_usec())
+	var spawned: int = 0
+	var attempts: int = 0
+	while spawned < count and attempts < count * 12:
+		attempts += 1
+		var wx: int = int(round(base.x)) + rng.randi_range(-24, 24)
+		var wz: int = int(round(base.z)) + rng.randi_range(-24, 24)
+		var surface_y: int = server.get_surface_y(wx, wz)
+		var ground_id: int = server.get_block_at_world(wx, surface_y - 1, wz)
+		var ground_sid: String = block_registry.get_string_id(ground_id)
+		if ground_sid != "kaizencraft:grass":
+			continue
+		var sheep: Node = sheep_script.new()
+		animals_root.add_child(sheep)
+		if sheep.has_method("setup_from_game"):
+			sheep.call("setup_from_game")
+		(sheep as Node3D).global_position = Vector3(float(wx) + 0.5, float(surface_y) + 0.05, float(wz) + 0.5)
+		spawned += 1
 
 func _show_help() -> void:
-	_post_system("Commands: /help, /damage <amount>, /give <id|numeric_id> [count], /clear, /time set morning|day|noon|afternoon|evening|night|midnight, /keepinventory true|false, /gamerule keepInventory true|false, /gamemode survival|creative, /body sex male|female, /body build base|slim|shredded|fat, /body size <height> <width> <weight>")
+	_post_system("Commands: /help, /damage <amount>, /give <id|numeric_id> [count], /clear, /time set morning|day|noon|afternoon|evening|night|midnight, /time speed <multiplier>, /keepinventory true|false, /gamerule keepInventory true|false, /gamemode survival|creative, /body sex male|female, /body build base|slim|shredded|fat, /body size <height> <width> <weight>")
 
 func _post_system(text: String) -> void:
 	if chat_bus != null:
 		chat_bus.post_system(text)
 
 func set_time_to_daylight() -> void:
-	var sunrise: float = night_duration_sec * 0.5
-	_time_of_day_sec = sunrise + day_duration_sec * 0.30
+	_time_of_day_sec = _clock_hour_to_cycle_seconds(9.0)
 	_update_day_night(0.0)
 
 func set_time_preset(label: String) -> bool:
-	var sunrise: float = night_duration_sec * 0.5
-	var sunset: float = sunrise + day_duration_sec
 	match label:
 		"morning":
-			_time_of_day_sec = sunrise + day_duration_sec * 0.12
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(5.0)
 		"day":
-			_time_of_day_sec = sunrise + day_duration_sec * 0.30
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(9.0)
 		"noon":
-			_time_of_day_sec = sunrise + day_duration_sec * 0.50
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(12.0)
 		"afternoon":
-			_time_of_day_sec = sunrise + day_duration_sec * 0.70
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(15.0)
 		"evening":
-			_time_of_day_sec = sunrise + day_duration_sec * 0.88
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(17.0)
 		"night":
-			_time_of_day_sec = sunset + night_duration_sec * 0.20
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(21.0)
 		"midnight":
-			_time_of_day_sec = sunset + night_duration_sec * 0.50
+			_time_of_day_sec = _clock_hour_to_cycle_seconds(0.0)
 		_:
 			return false
 	_update_day_night(0.0)
@@ -695,18 +821,33 @@ func _apply_cycle_settings() -> void:
 	var p: Dictionary = {}
 	if config_manager != null and config_manager.gameplay.has("gameplay") and config_manager.gameplay["gameplay"] is Dictionary:
 		p = config_manager.gameplay.get("gameplay", {}) as Dictionary
-	day_duration_sec = maxf(10.0, float(p.get("day_duration_sec", day_duration_sec)))
-	night_duration_sec = maxf(10.0, float(p.get("night_duration_sec", night_duration_sec)))
+	var use_real_clock: bool = bool(p.get("use_real_time_24h_clock", true))
+	if use_real_clock:
+		day_duration_sec = 14.0 * 60.0
+		night_duration_sec = 10.0 * 60.0
+	else:
+		day_duration_sec = maxf(60.0, float(p.get("day_duration_sec", day_duration_sec)))
+		night_duration_sec = maxf(60.0, float(p.get("night_duration_sec", night_duration_sec)))
+	max_time_speed_multiplier = maxf(20.0, float(p.get("max_time_speed_multiplier", max_time_speed_multiplier)))
+	time_speed_multiplier = clampf(float(p.get("time_speed_multiplier", time_speed_multiplier)), 0.0, max_time_speed_multiplier)
 	keep_inventory_enabled = bool(p.get("keep_inventory", keep_inventory_enabled))
 	Engine.max_fps = clampi(int(p.get("max_fps", 0)), 0, 1000)
 
 func _setup_world_visuals(scene: Node) -> void:
 	world_environment = WorldEnvironment.new()
 	environment_resource = Environment.new()
-	environment_resource.background_mode = Environment.BG_COLOR
-	environment_resource.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment_resource.ambient_light_sky_contribution = 0.0
+	environment_resource.background_mode = Environment.BG_SKY
+	environment_resource.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	environment_resource.ambient_light_sky_contribution = 1.0
 	environment_resource.ambient_light_color = Color(0.90, 0.92, 0.98)
+	var sky := Sky.new()
+	sky_material_resource = ProceduralSkyMaterial.new()
+	sky_material_resource.sky_top_color = Color(0.24, 0.42, 0.74)
+	sky_material_resource.sky_horizon_color = Color(0.68, 0.82, 1.0)
+	sky_material_resource.ground_horizon_color = Color(0.45, 0.38, 0.32)
+	sky_material_resource.ground_bottom_color = Color(0.20, 0.17, 0.14)
+	sky.sky_material = sky_material_resource
+	environment_resource.sky = sky
 	environment_resource.ambient_light_energy = 1.18
 	world_environment.environment = environment_resource
 	scene.add_child(world_environment)
@@ -731,7 +872,7 @@ func _setup_world_visuals(scene: Node) -> void:
 
 	sun_sprite = Sprite3D.new()
 	sun_sprite.texture = load("res://assets/textures/sky/sun.png") as Texture2D
-	sun_sprite.pixel_size = 0.32
+	sun_sprite.pixel_size = 1.10
 	sun_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	sun_sprite.shaded = false
 	sky_anchor.add_child(sun_sprite)
@@ -744,10 +885,12 @@ func _setup_world_visuals(scene: Node) -> void:
 			moon_phase_textures.append(phase_tex)
 	moon_sprite = Sprite3D.new()
 	moon_sprite.texture = moon_phase_textures[0] if moon_phase_textures.size() > 0 else (load("res://assets/textures/sky/moon.png") as Texture2D)
-	moon_sprite.pixel_size = 0.26
+	moon_sprite.pixel_size = 0.72
 	moon_sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
 	moon_sprite.shaded = false
 	sky_anchor.add_child(moon_sprite)
+
+	_setup_clouds()
 
 func _smooth01(t: float) -> float:
 	var c: float = clampf(t, 0.0, 1.0)
@@ -760,6 +903,52 @@ func _update_celestial_sprite(sprite: Sprite3D, dir: Vector3, dist: float, color
 	sprite.global_position = player.global_position + dir.normalized() * dist
 	sprite.modulate = color_mod
 
+func _setup_clouds() -> void:
+	if sky_anchor == null:
+		return
+	if cloud_root != null:
+		cloud_root.queue_free()
+	cloud_root = Node3D.new()
+	cloud_root.name = "CloudRoot"
+	sky_anchor.add_child(cloud_root)
+	cloud_sprites.clear()
+	cloud_base_positions.clear()
+	var cloud_tex: Texture2D = load("res://assets/textures/sky/clouds.png") as Texture2D
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 13371337
+	for i in range(18):
+		var sprite := Sprite3D.new()
+		sprite.texture = cloud_tex
+		sprite.billboard = BaseMaterial3D.BILLBOARD_DISABLED
+		sprite.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
+		sprite.pixel_size = rng.randf_range(0.90, 1.35)
+		var local_pos: Vector3 = Vector3(rng.randf_range(-240.0, 240.0), rng.randf_range(0.0, 18.0), rng.randf_range(-240.0, 240.0))
+		sprite.position = local_pos
+		sprite.modulate = Color(1.0, 1.0, 1.0, 0.0)
+		cloud_root.add_child(sprite)
+		cloud_sprites.append(sprite)
+		cloud_base_positions.append(local_pos)
+
+func _update_clouds(day_amount: float, dt: float) -> void:
+	if cloud_root == null or player == null:
+		return
+	var tile_size: float = 512.0
+	var time_s: float = Time.get_ticks_msec() / 1000.0
+	var drift_x: float = time_s * cloud_scroll_speed
+	var snapped_x: float = floor((player.global_position.x - drift_x) / tile_size) * tile_size
+	var snapped_z: float = floor(player.global_position.z / tile_size) * tile_size
+	cloud_root.global_position = Vector3(snapped_x + drift_x, 108.0, snapped_z)
+	var target_alpha: float = 0.12 + day_amount * 0.42
+	var blend: float = 1.0 if dt <= 0.0 else clampf(dt * 1.4, 0.0, 1.0)
+	for i in range(cloud_sprites.size()):
+		var sprite: Sprite3D = cloud_sprites[i] as Sprite3D
+		if sprite == null:
+			continue
+		var base_pos: Vector3 = cloud_base_positions[i] if i < cloud_base_positions.size() else sprite.position
+		sprite.position = Vector3(base_pos.x, base_pos.y + sin(time_s * 0.08 + float(i) * 0.61) * 0.3, base_pos.z)
+		var target_color: Color = Color(1.0, 1.0, 1.0, target_alpha)
+		sprite.modulate = sprite.modulate.lerp(target_color, blend)
+
 func _update_day_night(dt: float) -> void:
 	var total_cycle: float = day_duration_sec + night_duration_sec
 	if total_cycle <= 0.0:
@@ -771,84 +960,86 @@ func _update_day_night(dt: float) -> void:
 	if dt > 0.0 and _time_of_day_sec < prev_time:
 		_day_count += 1
 
-	var sunrise: float = night_duration_sec * 0.5
-	var sunset: float = sunrise + day_duration_sec
-	var time_sec: float = _time_of_day_sec
-	var overlap_sec: float = minf(day_duration_sec, night_duration_sec) * 0.18
-
-	var sun_dir: Vector3 = Vector3(0.25, 1.0, -0.28).normalized()
-	var moon_dir: Vector3 = Vector3(-0.25, 1.0, 0.24).normalized()
-	var sun_strength: float = 0.0
-	var moon_strength: float = 0.0
+	var hour: float = _cycle_to_clock_hour(_time_of_day_sec)
+	var daylight: float = 0.0
+	if hour >= 7.0 and hour < 17.0:
+		daylight = 1.0
+	elif hour >= 5.0 and hour < 7.0:
+		daylight = _smooth01((hour - 5.0) / 2.0)
+	elif hour >= 17.0 and hour < 19.0:
+		daylight = 1.0 - _smooth01((hour - 17.0) / 2.0)
+	else:
+		daylight = 0.0
 	var twilight: float = 0.0
+	if hour >= 5.0 and hour < 7.0:
+		twilight = 1.0 - absf(((hour - 5.0) / 2.0) - 0.5) * 2.0
+	elif hour >= 17.0 and hour < 19.0:
+		twilight = 1.0 - absf(((hour - 17.0) / 2.0) - 0.5) * 2.0
 
-	var day_t: float = clampf((time_sec - sunrise) / maxf(day_duration_sec, 0.001), 0.0, 1.0)
-	var night_elapsed: float = time_sec - sunset
-	if night_elapsed < 0.0:
-		night_elapsed += total_cycle
-	var night_t: float = clampf(night_elapsed / maxf(night_duration_sec, 0.001), 0.0, 1.0)
+	var sun_progress: float = clampf((hour - 6.0) / 12.0, 0.0, 1.0)
+	var sun_height: float = sin(sun_progress * PI)
+	var sun_horiz: float = lerpf(0.95, -0.95, sun_progress)
+	var target_sun_dir: Vector3 = Vector3(sun_horiz, maxf(-0.26, sun_height), -0.28).normalized()
+	var moon_hour: float = fmod(hour + 12.0, 24.0)
+	var moon_progress: float = clampf((moon_hour - 6.0) / 12.0, 0.0, 1.0)
+	var moon_height: float = sin(moon_progress * PI)
+	var moon_horiz: float = lerpf(-0.95, 0.95, moon_progress)
+	var target_moon_dir: Vector3 = Vector3(moon_horiz, maxf(-0.26, moon_height), 0.24).normalized()
+	var target_sun_strength: float = daylight
+	var target_moon_strength: float = maxf(0.0, 1.0 - daylight * 0.96) * maxf(0.18, sin(moon_progress * PI))
 
-	var sun_height: float = sin(day_t * PI)
-	var sun_horiz: float = lerpf(0.95, -0.95, day_t)
-	sun_dir = Vector3(sun_horiz, maxf(-0.22, sun_height), -0.28).normalized()
-	var moon_height: float = sin(night_t * PI)
-	var moon_horiz: float = lerpf(-0.95, 0.95, night_t)
-	moon_dir = Vector3(moon_horiz, maxf(-0.22, moon_height), 0.24).normalized()
+	var day_tint: Color = Color(1.00, 0.995, 0.99)
+	var dusk_tint: Color = Color(1.00, 0.72, 0.50)
+	var night_tint: Color = Color(0.18, 0.22, 0.34)
+	var target_ambient: Color = night_tint.lerp(dusk_tint, twilight * 0.75).lerp(day_tint, daylight)
+	var target_sky: Color = Color(0.08, 0.11, 0.20).lerp(Color(0.97, 0.69, 0.48), twilight * 0.62).lerp(Color(0.53, 0.77, 1.0), daylight)
+	var target_terrain_tint: Color = Color(0.78, 0.84, 0.94).lerp(Color(1.0, 1.0, 1.0), clampf(daylight * 0.9 + twilight * 0.1, 0.0, 1.0))
 
-	sun_strength = _smooth01(maxf(0.0, sun_height))
-	moon_strength = _smooth01(maxf(0.0, moon_height))
-
-	if time_sec >= sunset - overlap_sec and time_sec <= sunset + overlap_sec:
-		var dusk_t: float = 1.0 - absf(time_sec - sunset) / maxf(overlap_sec, 0.001)
-		moon_strength = maxf(moon_strength, dusk_t * 0.42)
-		moon_dir = Vector3(0.85, maxf(0.06, dusk_t * 0.36), 0.22).normalized()
-		twilight = maxf(twilight, dusk_t)
-	if time_sec <= sunrise + overlap_sec or time_sec >= total_cycle - overlap_sec:
-		var dawn_dist: float = minf(absf(time_sec - sunrise), absf((time_sec - total_cycle) - sunrise))
-		var dawn_t: float = 1.0 - dawn_dist / maxf(overlap_sec, 0.001)
-		sun_strength = maxf(sun_strength, dawn_t * 0.42)
-		sun_dir = Vector3(-0.85, maxf(0.06, dawn_t * 0.34), -0.28).normalized()
-		twilight = maxf(twilight, dawn_t)
-	if twilight <= 0.0:
-		twilight = maxf(1.0 - clampf(sun_height * 2.6, 0.0, 1.0), 1.0 - clampf(moon_height * 2.4, 0.0, 1.0))
-
-	var day_tint: Color = Color(1.00, 0.99, 0.98)
-	var dusk_tint: Color = Color(1.00, 0.82, 0.60)
-	var night_tint: Color = Color(0.72, 0.78, 0.96)
-	var ambient: Color = night_tint.lerp(dusk_tint, twilight * 0.65).lerp(day_tint, clampf(sun_strength, 0.0, 1.0))
-	var sky: Color = Color(0.16, 0.19, 0.30).lerp(Color(0.96, 0.74, 0.52), twilight * 0.58).lerp(Color(0.58, 0.80, 1.0), clampf(sun_strength, 0.0, 1.0))
+	var blend: float = 1.0 if dt <= 0.0 else clampf(dt * 0.20, 0.0, 1.0)
+	_sky_color_current = _sky_color_current.lerp(target_sky, blend)
+	_ambient_color_current = _ambient_color_current.lerp(target_ambient, blend)
+	_terrain_tint_current = _terrain_tint_current.lerp(target_terrain_tint, blend)
+	_sun_dir_current = _sun_dir_current.lerp(target_sun_dir, blend).normalized()
+	_moon_dir_current = _moon_dir_current.lerp(target_moon_dir, blend).normalized()
+	_sun_strength_current = lerpf(_sun_strength_current, target_sun_strength, blend)
+	_moon_strength_current = lerpf(_moon_strength_current, target_moon_strength, blend)
 
 	if environment_resource != null:
-		environment_resource.background_color = sky
-		environment_resource.ambient_light_color = ambient
-		environment_resource.ambient_light_energy = 1.04 + sun_strength * 1.02 + moon_strength * 0.34
+		environment_resource.background_color = _sky_color_current
+		environment_resource.ambient_light_color = _ambient_color_current
+		environment_resource.ambient_light_energy = 0.82 + _sun_strength_current * 1.18 + _moon_strength_current * 0.24
+	if sky_material_resource != null:
+		sky_material_resource.sky_top_color = _sky_color_current.darkened(0.18)
+		sky_material_resource.sky_horizon_color = _sky_color_current
+		sky_material_resource.ground_horizon_color = Color(0.32, 0.28, 0.24).lerp(Color(0.58, 0.42, 0.24), twilight * 0.4)
+		sky_material_resource.ground_bottom_color = Color(0.12, 0.10, 0.09)
 
 	if sun_light != null:
-		sun_light.light_color = Color(1.0, 0.96, 0.90).lerp(Color(1.0, 0.82, 0.60), twilight)
-		sun_light.light_energy = sun_strength * 1.72
-		sun_light.visible = sun_strength > 0.01
-		sun_light.look_at(-sun_dir, Vector3.UP)
+		sun_light.light_color = Color(1.0, 0.96, 0.90).lerp(Color(1.0, 0.80, 0.56), twilight)
+		sun_light.light_energy = _sun_strength_current * 1.35
+		sun_light.visible = _sun_strength_current > 0.01
+		sun_light.look_at(-_sun_dir_current, Vector3.UP)
 	if moon_light != null:
 		moon_light.light_color = Color(0.76, 0.84, 1.0)
-		moon_light.light_energy = moon_strength * 0.62
-		moon_light.visible = moon_strength > 0.01
-		moon_light.look_at(-moon_dir, Vector3.UP)
+		moon_light.light_energy = _moon_strength_current * 0.34
+		moon_light.visible = _moon_strength_current > 0.01
+		moon_light.look_at(-_moon_dir_current, Vector3.UP)
 
-	var terrain_tint: Color = Color(0.93, 0.95, 1.0).lerp(Color(1.00, 1.00, 1.00), clampf(sun_strength * 0.85 + twilight * 0.10, 0.0, 1.0))
 	if world_manager != null:
-		world_manager.call("set_day_night_tint", terrain_tint)
+		world_manager.call("set_day_night_tint", _terrain_tint_current)
 		if world_manager.has_method("set_celestial_lighting"):
-			world_manager.call("set_celestial_lighting", sun_dir, moon_dir, sun_strength, moon_strength, ambient)
+			world_manager.call("set_celestial_lighting", _sun_dir_current, _moon_dir_current, _sun_strength_current, _moon_strength_current, _ambient_color_current)
 
-	_update_celestial_sprite(sun_sprite, sun_dir, 180.0, Color(1, 1, 1, clampf(sun_strength * 1.10, 0.0, 1.0)))
-	_update_celestial_sprite(moon_sprite, moon_dir, 180.0, Color(1, 1, 1, clampf(moon_strength * 1.18, 0.0, 1.0)))
+	_update_celestial_sprite(sun_sprite, _sun_dir_current, 180.0, Color(1, 1, 1, clampf(_sun_strength_current * 1.10, 0.0, 1.0)))
+	_update_celestial_sprite(moon_sprite, _moon_dir_current, 180.0, Color(1, 1, 1, clampf(_moon_strength_current * 1.18, 0.0, 1.0)))
 	if moon_sprite != null and moon_phase_textures.size() > 0:
 		var phase_index: int = _day_count % moon_phase_textures.size()
 		moon_sprite.texture = moon_phase_textures[phase_index]
 	if sun_sprite != null:
-		sun_sprite.visible = sun_strength > 0.01
+		sun_sprite.visible = _sun_strength_current > 0.01
 	if moon_sprite != null:
-		moon_sprite.visible = moon_strength > 0.01
+		moon_sprite.visible = _moon_strength_current > 0.01
+	_update_clouds(daylight, dt)
 
 func _load_player_state(default_spawn_pos: Vector3) -> void:
 	if player == null:
@@ -871,9 +1062,11 @@ func _save_player_state() -> void:
 	KZ_PathUtil.write_text(_playerdata_path(), JSON.stringify(player.serialize_state(), "\t"))
 
 func _load_world_state() -> void:
-	_time_of_day_sec = night_duration_sec * 0.5 + day_duration_sec * 0.12
+	_time_of_day_sec = _clock_hour_to_cycle_seconds(8.0)
 	_day_count = 0
 	keep_inventory_enabled = false
+	time_speed_multiplier = 1.0
+	max_time_speed_multiplier = 240.0
 	game_mode = "survival"
 	var path: String = _worldstate_path()
 	if not KZ_PathUtil.file_exists(path):
@@ -886,6 +1079,8 @@ func _load_world_state() -> void:
 	_time_of_day_sec = float(parsed.get("time_of_day_sec", _time_of_day_sec))
 	_day_count = int(parsed.get("day_count", _day_count))
 	keep_inventory_enabled = bool(parsed.get("keep_inventory", keep_inventory_enabled))
+	max_time_speed_multiplier = maxf(20.0, float(parsed.get("max_time_speed_multiplier", max_time_speed_multiplier)))
+	time_speed_multiplier = clampf(float(parsed.get("time_speed_multiplier", time_speed_multiplier)), 0.0, max_time_speed_multiplier)
 	game_mode = str(parsed.get("game_mode", game_mode)).to_lower()
 	if game_mode != "creative":
 		game_mode = "survival"
@@ -895,6 +1090,8 @@ func _save_world_state() -> void:
 		"time_of_day_sec": _time_of_day_sec,
 		"day_count": _day_count,
 		"keep_inventory": keep_inventory_enabled,
+		"time_speed_multiplier": time_speed_multiplier,
+		"max_time_speed_multiplier": max_time_speed_multiplier,
 		"game_mode": game_mode
 	}
 	KZ_PathUtil.write_text(_worldstate_path(), JSON.stringify(data, "\t"))
@@ -961,9 +1158,15 @@ func _cleanup_session_nodes() -> void:
 		sky_anchor = null
 		sun_sprite = null
 		moon_sprite = null
+		sky_material_resource = null
+		cloud_root = null
+		cloud_sprites.clear()
 	if server != null:
 		server.queue_free()
 		server = null
+	if animals_root != null:
+		animals_root.queue_free()
+		animals_root = null
 	if chat_bus != null:
 		chat_bus.queue_free()
 		chat_bus = null

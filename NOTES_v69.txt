@@ -1,0 +1,19 @@
+KaizenCraft v69 foundation pass
+
+Included in this zip:
+- first-person body/camera offset rework aimed at showing lower body from eye level instead of inside the chest
+- held item/block viewmodel in first person
+- textured dropped items/blocks instead of flat solid colors when preview textures exist
+- 24-minute full day cycle with 24-hour clock display backend and much higher configurable time speed cap
+- smoother hour-based sunrise/sunset lighting transitions
+- larger sun/moon and moving clouds that drift across the world instead of sticking to the player
+- procedural sky material setup for a more proper sky backdrop
+- sheep hitbox body and custom-model swap path kept
+- configurable food/fuel/tool/item metadata in BlockRegistry
+- raw mutton and cooked mutton item definitions, furnace/pickaxe item/block definitions, and new textures for them
+- stronger chunk loading budgets / extra loaded margin aimed at reducing terrain holes
+- safer water surface mesh offset and opaque water shader to reduce seam artifacts
+
+Not fully complete yet:
+- furnace UI / full smelting station workflow is not fully implemented in this pass
+- full block rendering rewrite was not completed; this pass tightens the current system instead of replacing it

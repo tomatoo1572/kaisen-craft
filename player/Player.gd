@@ -24,12 +24,14 @@ var walk_speed: float = 4.8
 var jog_speed: float = 7.8
 var run_speed: float = 12.4
 var walk_mode_index: int = 1
-var jump_velocity: float = 7.15
+var jump_velocity: float = 6.95
 var gravity: float = 44.0
 var mouse_sensitivity: float = 0.12
 var camera_fov: float = 75.0
 
 var cam: Camera3D
+var held_item_root: Node3D
+var held_item_mesh: MeshInstance3D
 var visual_root: Node3D
 var player_model: Node3D
 var appearance_profile: RefCounted
@@ -45,13 +47,13 @@ var first_person_body_visible: bool = true
 # Voxel collision sampling
 var body_radius: float = 0.27
 var floor_probe_radius: float = 0.20
-var step_height: float = 1.08
+var step_height: float = 1.02
 var auto_step_enabled: bool = false
 
 # Ground snapping
 var ground_epsilon: float = 0.06
 var snap_down_max: float = 0.64
-var jump_climb_height: float = 1.24
+var jump_climb_height: float = 0.92
 var _jump_assist_timer: float = 0.0
 var _coyote_timer: float = 0.0
 
@@ -118,7 +120,13 @@ func _init() -> void:
 	cam = Camera3D.new()
 	cam.fov = camera_fov
 	add_child(cam)
-	third_person_freelook_pitch = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+	held_item_root = Node3D.new()
+	held_item_root.name = "HeldItemRoot"
+	cam.add_child(held_item_root)
+	held_item_mesh = MeshInstance3D.new()
+	held_item_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	held_item_root.add_child(held_item_mesh)
+	third_person_freelook_pitch = clampf(pitch * 0.24, deg_to_rad(-18.0), deg_to_rad(24.0))
 	_apply_camera_mode()
 
 func _ready() -> void:
@@ -129,6 +137,7 @@ func _ready() -> void:
 			player_model.call("apply_profile")
 		if player_model.has_method("set_look_pitch"):
 			player_model.call("set_look_pitch", pitch)
+	_refresh_held_item_viewmodel()
 	if not _is_ui_open():
 		Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED as Input.MouseMode)
 	_emit_survival_signals()
@@ -137,6 +146,7 @@ func _ready() -> void:
 	emit_signal("camera_mode_changed", get_camera_mode_name())
 	emit_signal("flight_changed", creative_flight_enabled)
 	emit_signal("appearance_changed", get_character_appearance())
+	_refresh_held_item_viewmodel()
 
 func apply_settings(gameplay_cfg: Dictionary) -> void:
 	var p: Dictionary = {}
@@ -225,6 +235,7 @@ func apply_character_appearance(data: Dictionary) -> void:
 		elif player_model.has_method("apply_profile"):
 			player_model.call("apply_profile")
 	emit_signal("appearance_changed", get_character_appearance())
+	_refresh_held_item_viewmodel()
 	_apply_camera_mode()
 
 func set_body_sex(sex: String) -> void:
@@ -254,27 +265,62 @@ func toggle_camera_mode() -> void:
 	camera_mode = (camera_mode + 1) % 2
 	if camera_mode != 1:
 		third_person_freelook_yaw = 0.0
-		third_person_freelook_pitch = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+		third_person_freelook_pitch = clampf(pitch * 0.24, deg_to_rad(-18.0), deg_to_rad(24.0))
 	_apply_camera_mode()
 	emit_signal("camera_mode_changed", get_camera_mode_name())
 
 func _apply_camera_mode() -> void:
 	if cam == null:
 		return
+	var eye_height: float = 1.60
+	var eye_forward_offset: float = -0.08
+	var first_person_visual_offset: Vector3 = Vector3(0.0, -0.12, -0.18)
+	var third_person_pivot_height: float = 1.42
+	var third_person_body_width: float = 1.0
+	var third_person_body_height: float = 1.8
+	if player_model != null:
+		if player_model.has_method("get_first_person_eye_height"):
+			eye_height = float(player_model.call("get_first_person_eye_height"))
+		elif player_model.has_method("get_first_person_camera_height"):
+			eye_height = float(player_model.call("get_first_person_camera_height"))
+		if player_model.has_method("get_first_person_forward_offset"):
+			eye_forward_offset = float(player_model.call("get_first_person_forward_offset"))
+		if player_model.has_method("get_first_person_visual_offset"):
+			first_person_visual_offset = player_model.call("get_first_person_visual_offset")
+		if player_model.has_method("get_third_person_pivot_height"):
+			third_person_pivot_height = float(player_model.call("get_third_person_pivot_height"))
+		elif player_model.has_method("get_third_person_focus_height"):
+			third_person_pivot_height = float(player_model.call("get_third_person_focus_height"))
+		if player_model.has_method("get_current_body_width"):
+			third_person_body_width = maxf(0.70, float(player_model.call("get_current_body_width")))
+		if player_model.has_method("get_current_body_height"):
+			third_person_body_height = maxf(1.60, float(player_model.call("get_current_body_height")))
 	if camera_mode == 0:
-		cam.position = Vector3(0.0, 1.56, 0.06)
+		visual_root.position = first_person_visual_offset
+		cam.position = Vector3(0.0, eye_height, eye_forward_offset)
 		cam.rotation = Vector3(pitch, 0.0, 0.0)
+		if held_item_root != null:
+			held_item_root.visible = true
+			held_item_root.position = Vector3(0.30, -0.24, -0.48)
+			held_item_root.rotation_degrees = Vector3(-12.0, -18.0, 8.0)
+			held_item_root.scale = Vector3.ONE
 	else:
-		var target_local: Vector3 = Vector3(0.0, 1.42, 0.0)
+		visual_root.position = Vector3.ZERO
+		if held_item_root != null:
+			held_item_root.visible = false
+		var target_local: Vector3 = Vector3(0.0, third_person_pivot_height, 0.0)
 		var orbit_yaw: float = third_person_freelook_yaw
 		var orbit_pitch: float = third_person_freelook_pitch
 		if not _is_third_person_freelook_active():
 			orbit_yaw = 0.0
-			orbit_pitch = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
-		var dist: float = 2.15
+			orbit_pitch = clampf(pitch * 0.24, deg_to_rad(-24.0), deg_to_rad(18.0))
+		var dist: float = clampf(third_person_body_height * 1.52, 2.80, 3.45)
 		var horiz: float = cos(orbit_pitch) * dist
+		# This model faces the opposite local forward from the old camera assumptions.
+		# Positive Z keeps the default camera behind the player instead of in front.
 		var orbit: Vector3 = Vector3(sin(orbit_yaw) * horiz, sin(orbit_pitch) * dist, cos(orbit_yaw) * horiz)
-		var shoulder: Vector3 = Basis(Vector3.UP, orbit_yaw) * Vector3(0.48, 0.0, 0.0)
+		var shoulder_width: float = clampf(third_person_body_width * 0.16, 0.12, 0.22)
+		var shoulder: Vector3 = Basis(Vector3.UP, orbit_yaw) * Vector3(-shoulder_width, 0.0, 0.0)
 		cam.position = target_local + orbit + shoulder
 		cam.look_at(to_global(target_local), Vector3.UP)
 	if player_model != null:
@@ -284,6 +330,7 @@ func _apply_camera_mode() -> void:
 			player_model.call("set_first_person_hidden", camera_mode == 0)
 		if player_model.has_method("set_look_pitch"):
 			player_model.call("set_look_pitch", pitch)
+	_refresh_held_item_viewmodel()
 
 func is_in_creative_flight() -> bool:
 	return creative_flight_enabled
@@ -374,6 +421,7 @@ func pickup_item(item_id: String, count: int) -> bool:
 	var added: int = count - remaining
 	if added > 0:
 		emit_signal("inventory_changed")
+		_refresh_held_item_viewmodel()
 	return remaining == 0
 
 func serialize_state() -> Dictionary:
@@ -435,6 +483,7 @@ func load_state(data: Dictionary) -> void:
 	emit_signal("inventory_changed")
 	emit_signal("walk_mode_changed", get_walk_mode_name())
 	emit_signal("hotbar_selected_changed", inventory.selected_index)
+	_refresh_held_item_viewmodel()
 
 func _is_ui_open() -> bool:
 	return inventory_is_open or settings_is_open or chat_is_open or crafting_table_is_open or is_dead
@@ -522,6 +571,7 @@ func _cycle_hotbar(delta: int) -> void:
 	idx = idx % KZ_Inventory.HOTBAR_SIZE
 	inventory.set_selected(idx)
 	emit_signal("hotbar_selected_changed", idx)
+	_refresh_held_item_viewmodel()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if is_dead:
@@ -579,6 +629,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			var idx: int = int(ek.keycode - KEY_1)
 			inventory.set_selected(idx)
 			emit_signal("hotbar_selected_changed", idx)
+			_refresh_held_item_viewmodel()
 			return
 
 	if event is InputEventMouseMotion:
@@ -638,7 +689,7 @@ func _physics_process(dt: float) -> void:
 	_jump_assist_timer = maxf(0.0, _jump_assist_timer - dt)
 	if camera_mode == 1 and not _is_third_person_freelook_active():
 		third_person_freelook_yaw = lerpf(third_person_freelook_yaw, 0.0, min(1.0, dt * third_person_freelook_return_speed))
-		var target_pitch: float = clampf(pitch * 0.34, deg_to_rad(-18.0), deg_to_rad(24.0))
+		var target_pitch: float = clampf(pitch * 0.24, deg_to_rad(-24.0), deg_to_rad(18.0))
 		third_person_freelook_pitch = lerpf(third_person_freelook_pitch, target_pitch, min(1.0, dt * third_person_freelook_return_speed))
 
 	var game_node_mode: Node = get_node_or_null("/root/Game")
@@ -666,7 +717,7 @@ func _physics_process(dt: float) -> void:
 	input_dir.y = 0.0
 	input_dir = input_dir.normalized()
 	var in_water: bool = _is_in_water(srv, pos)
-	var move_speed: float = get_current_move_speed() * (0.58 if in_water else 1.0)
+	var move_speed: float = get_current_move_speed() * (0.42 if in_water else 1.0)
 	var move_h: Vector3 = input_dir * move_speed * dt
 
 	if creative_mode and creative_flight_enabled and not _is_ui_open():
@@ -701,12 +752,17 @@ func _physics_process(dt: float) -> void:
 		_coyote_timer = maxf(0.0, _coyote_timer - dt)
 
 	if in_water:
-		if (not _is_ui_open()) and Input.is_action_pressed("jump"):
-			_vel_y = minf(_vel_y + 28.0 * dt, 5.0)
+		if not _is_ui_open():
+			if Input.is_action_pressed("jump"):
+				_vel_y = minf(_vel_y + 18.0 * dt, 4.2)
+			elif Input.is_action_pressed("sneak"):
+				_vel_y = maxf(_vel_y - 16.0 * dt, -3.0)
+			else:
+				_vel_y -= gravity * 0.08 * dt
 		else:
-			_vel_y -= gravity * 0.16 * dt
-		_vel_y = clampf(_vel_y, -3.2, 5.0)
-		_vel_y *= 0.92
+			_vel_y -= gravity * 0.08 * dt
+		_vel_y = clampf(_vel_y, -2.4, 4.2)
+		_vel_y *= 0.94
 	elif (not _is_ui_open()) and Input.is_action_just_pressed("jump"):
 		_jump_assist_timer = 0.32
 		if _is_grounded or _coyote_timer > 0.0:
@@ -834,17 +890,10 @@ func _try_auto_step(srv: Node, pos: Vector3, delta: Vector3) -> Vector3:
 	return landed
 
 func _try_jump_climb(srv: Node, pos: Vector3, delta: Vector3) -> Vector3:
-	var ahead: Vector3 = pos + delta
-	var ahead_floor: float = _find_local_floor_y(srv, ahead)
-	if ahead_floor > -999999.0:
-		var ledge_dy: float = ahead_floor - pos.y
-		if ledge_dy > 0.05 and ledge_dy <= jump_climb_height:
-			var landed_direct: Vector3 = Vector3(ahead.x, ahead_floor, ahead.z)
-			if not _collides_at(srv, landed_direct):
-				return landed_direct
-
-	var rises: Array[float] = [0.20, 0.40, 0.60, 0.80, 1.00, jump_climb_height]
+	var rises: Array[float] = [0.16, 0.30, 0.44, 0.58, 0.72, 0.86]
 	for rise: float in rises:
+		if rise > jump_climb_height:
+			continue
 		var candidate: Vector3 = pos + Vector3(0.0, rise, 0.0) + delta
 		if _collides_at(srv, candidate):
 			continue
@@ -852,9 +901,10 @@ func _try_jump_climb(srv: Node, pos: Vector3, delta: Vector3) -> Vector3:
 		if floor_y <= -999999.0:
 			continue
 		var dy: float = floor_y - candidate.y
-		if dy < -0.25 or dy > 0.65:
+		if dy < -0.18 or dy > 0.36:
 			continue
-		var landed: Vector3 = Vector3(candidate.x, floor_y, candidate.z)
+		var landed_y: float = minf(floor_y, pos.y + minf(rise, 0.30))
+		var landed: Vector3 = Vector3(candidate.x, landed_y, candidate.z)
 		if _collides_at(srv, landed):
 			continue
 		return landed
@@ -1009,20 +1059,26 @@ func _update_block_breaking(dt: float) -> void:
 func _get_break_time_seconds(runtime_id: int) -> float:
 	var game_node: Node = get_node_or_null("/root/Game")
 	if game_node != null and game_node.has_method("is_creative_mode") and bool(game_node.call("is_creative_mode")):
-		return 0.01
+		return 0.10
 	var srv: Node = _get_server()
 	if srv == null or srv.registry == null:
-		return 0.35
+		return 0.65
 	var hardness: float = srv.registry.get_hardness_by_runtime(runtime_id)
 	var preferred_tool: String = srv.registry.get_preferred_tool_by_runtime(runtime_id)
 	var selected_item_id: String = inventory.get_selected_id()
+	var selected_tool_type: String = srv.registry.get_tool_type_for_item(selected_item_id)
 	var speed_multiplier: float = 1.0
-	if preferred_tool == "axe" and selected_item_id == "kaizencraft:wooden_axe":
-		speed_multiplier = 2.4
-	var base_time: float = maxf(0.12, hardness * 0.45)
-	return maxf(0.08, base_time / speed_multiplier)
+	if preferred_tool != "" and selected_tool_type == preferred_tool:
+		speed_multiplier = 2.0
+	var base_time: float = maxf(0.45, hardness * 1.10)
+	return maxf(0.22, base_time / speed_multiplier)
 
 func _try_break_block() -> void:
+	var game_node_attack: Node = get_node_or_null("/root/Game")
+	if game_node_attack != null and game_node_attack.has_method("try_attack_entity_from_player"):
+		if bool(game_node_attack.call("try_attack_entity_from_player", self)):
+			_reset_mining_state()
+			return
 	var srv: Node = _get_server()
 	if srv == null:
 		_reset_mining_state()
@@ -1041,7 +1097,39 @@ func _try_break_block() -> void:
 		mining_runtime_id = rid
 		mining_progress_sec = 0.0
 
+
+func _try_consume_selected_item() -> bool:
+	if inventory == null or not inventory.has_selected():
+		return false
+	var game_node: Node = get_node_or_null("/root/Game")
+	if game_node == null:
+		return false
+	var registry_v: Variant = null
+	if game_node.has_method("get"):
+		registry_v = game_node.get("block_registry")
+	if not (registry_v is KZ_BlockRegistry):
+		return false
+	var reg: KZ_BlockRegistry = registry_v as KZ_BlockRegistry
+	var item_id: String = inventory.get_selected_id()
+	if item_id == "" or not reg.is_item_edible(item_id):
+		return false
+	var food: Dictionary = reg.get_food_values(item_id)
+	if not bool(food.get("edible", false)):
+		return false
+	var game_node_mode: Node = get_node_or_null("/root/Game")
+	var creative_mode: bool = game_node_mode != null and game_node_mode.has_method("is_creative_mode") and bool(game_node_mode.call("is_creative_mode"))
+	if not creative_mode:
+		inventory.consume_selected(1)
+	set_hunger(hunger + float(food.get("hunger_restore", 0.0)))
+	set_thirst(thirst + float(food.get("thirst_restore", 0.0)))
+	set_health(health + float(food.get("health_restore", 0.0)))
+	emit_signal("inventory_changed")
+	_refresh_held_item_viewmodel()
+	return true
+
 func _try_place_block() -> void:
+	if _try_consume_selected_item():
+		return
 	var srv: Node = _get_server()
 	if srv == null:
 		return
@@ -1079,6 +1167,7 @@ func _try_place_block() -> void:
 		if not creative_mode:
 			inventory.consume_selected(1)
 		emit_signal("inventory_changed")
+		_refresh_held_item_viewmodel()
 
 func _drop_selected_item(amount: int) -> void:
 	if inventory == null or not inventory.has_selected() or amount <= 0:
@@ -1093,9 +1182,61 @@ func _drop_selected_item(amount: int) -> void:
 		return
 	inventory.consume_selected(drop_count)
 	emit_signal("inventory_changed")
+	_refresh_held_item_viewmodel()
 	var forward: Vector3 = -global_transform.basis.z
 	var spawn_pos: Vector3 = cam.global_position + forward * 1.0 + Vector3(0.0, -0.25, 0.0)
 	game_node.call("spawn_dropped_item", selected_id, drop_count, spawn_pos)
+
+
+func _refresh_held_item_viewmodel() -> void:
+	if held_item_root == null or held_item_mesh == null:
+		return
+	if camera_mode != 0 or inventory == null or not inventory.has_selected():
+		held_item_mesh.visible = false
+		return
+	var game_node: Node = get_node_or_null("/root/Game")
+	if game_node == null or not game_node.has_method("get"):
+		held_item_mesh.visible = false
+		return
+	var reg_v: Variant = game_node.get("block_registry")
+	if not (reg_v is KZ_BlockRegistry):
+		held_item_mesh.visible = false
+		return
+	var reg: KZ_BlockRegistry = reg_v as KZ_BlockRegistry
+	var item_id: String = inventory.get_selected_id()
+	if item_id == "":
+		held_item_mesh.visible = false
+		return
+	var preview: Dictionary = reg.get_preview_paths(item_id)
+	var mode: String = str(preview.get("mode", "item"))
+	var tex_path: String = str(preview.get("side", preview.get("all", preview.get("top", ""))))
+	if mode != "block":
+		tex_path = str(preview.get("all", preview.get("side", preview.get("top", ""))))
+	if tex_path == "" or not ResourceLoader.exists(tex_path):
+		held_item_mesh.visible = false
+		return
+	var tex: Texture2D = load(tex_path) as Texture2D
+	if tex == null:
+		held_item_mesh.visible = false
+		return
+	var mat := StandardMaterial3D.new()
+	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+	mat.albedo_texture = tex
+	mat.cull_mode = BaseMaterial3D.CULL_BACK
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if mode != "block" else BaseMaterial3D.TRANSPARENCY_DISABLED
+	if mode == "block":
+		var box := BoxMesh.new()
+		box.size = Vector3(0.22, 0.22, 0.22)
+		held_item_mesh.mesh = box
+		held_item_root.scale = Vector3.ONE
+	else:
+		var quad := QuadMesh.new()
+		quad.size = Vector2(0.26, 0.26)
+		held_item_mesh.mesh = quad
+		held_item_root.rotation_degrees = Vector3(-12.0, -28.0, 8.0)
+	held_item_mesh.material_override = mat
+	held_item_mesh.visible = true
 
 func _voxel_raycast(max_dist: float) -> Dictionary:
 	var srv: Node = _get_server()

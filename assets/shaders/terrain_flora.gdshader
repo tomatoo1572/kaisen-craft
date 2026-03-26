@@ -43,9 +43,9 @@ void fragment() {
 	float moon_lambert = max(dot(n, normalize(-moon_dir)), 0.0);
 	float sun_term = cel_band(sun_lambert) * sun_strength;
 	float moon_term = cel_band(moon_lambert) * moon_strength;
-	vec3 lighting = ambient_tint * 0.92;
-	lighting += vec3(1.06, 1.00, 0.94) * sun_term * 0.80;
-	lighting += vec3(0.72, 0.82, 1.02) * moon_term * 0.34;
+	vec3 lighting = ambient_tint * 0.78;
+	lighting += vec3(1.00, 0.98, 0.94) * sun_term * 0.66;
+	lighting += vec3(0.64, 0.74, 0.94) * moon_term * 0.26;
 	ALBEDO = texel.rgb * day_night_tint * lighting;
 	ALPHA = 1.0;
 	ROUGHNESS = 1.0;

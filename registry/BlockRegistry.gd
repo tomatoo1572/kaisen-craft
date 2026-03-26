@@ -12,11 +12,18 @@ class BlockDef extends RefCounted:
 	var light_level: int = 0
 	var hardness: float = 0.6
 	var preferred_tool: String = ""
+	var tool_type: String = ""
 	var order_hint: int = 999999
 	var texture_all_path: String = ""
 	var texture_top_path: String = ""
 	var texture_bottom_path: String = ""
 	var texture_side_path: String = ""
+	var attack_damage: float = 0.5
+	var edible: bool = false
+	var hunger_restore: float = 0.0
+	var health_restore: float = 0.0
+	var thirst_restore: float = 0.0
+	var fuel_burn_seconds: float = 0.0
 
 	func get_face_texture_path(axis: int, dir: int) -> String:
 		if axis == 1 and dir == +1 and texture_top_path != "":
@@ -83,7 +90,14 @@ func _read_defs_from_folder(folder_user_path: String) -> Array[BlockDef]:
 		bd.light_level = int(parsed.get("light_level", 0))
 		bd.hardness = maxf(0.05, float(parsed.get("hardness", _default_hardness_for_id(sid))))
 		bd.preferred_tool = String(parsed.get("preferred_tool", _default_tool_for_id(sid))).strip_edges().to_lower()
+		bd.tool_type = String(parsed.get("tool_type", _default_item_tool_type_for_id(sid))).strip_edges().to_lower()
 		bd.order_hint = _order_hint_for_id(sid, int(parsed.get("order", 999999)))
+		bd.attack_damage = float(parsed.get("combat_damage", _default_attack_damage_for_id(sid)))
+		bd.edible = bool(parsed.get("edible", false))
+		bd.hunger_restore = float(parsed.get("hunger_restore", 0.0))
+		bd.health_restore = float(parsed.get("health_restore", 0.0))
+		bd.thirst_restore = float(parsed.get("thirst_restore", 0.0))
+		bd.fuel_burn_seconds = maxf(0.0, float(parsed.get("fuel_burn_seconds", _default_fuel_burn_seconds_for_id(sid))))
 		var tint_str: String = String(parsed.get("tint", "#ffffff"))
 		bd.tint = _parse_hex_color(tint_str)
 		var textures_v: Variant = parsed.get("textures", {})
@@ -146,6 +160,16 @@ func _order_hint_for_id(sid: String, fallback: int) -> int:
 			return 10
 		"kaizencraft:sand":
 			return 11
+		"kaizencraft:wool":
+			return 12
+		"kaizencraft:mutton":
+			return 13
+		"kaizencraft:cooked_mutton":
+			return 14
+		"kaizencraft:wooden_pickaxe":
+			return 15
+		"kaizencraft:furnace":
+			return 16
 		_:
 			return fallback
 
@@ -245,6 +269,12 @@ func get_preferred_tool_by_runtime(runtime_id: int) -> String:
 		return ""
 	return def.preferred_tool
 
+func get_attack_damage_for_item(item_id: String, fallback: float = 0.5) -> float:
+	var def: BlockDef = get_def_by_string(item_id)
+	if def == null:
+		return fallback
+	return def.attack_damage
+
 func _default_hardness_for_id(sid: String) -> float:
 	match sid:
 		"kaizencraft:grass":
@@ -269,15 +299,85 @@ func _default_hardness_for_id(sid: String) -> float:
 			return 2.2
 		"kaizencraft:sand":
 			return 0.6
+		"kaizencraft:wool":
+			return 0.2
+		"kaizencraft:mutton":
+			return 0.2
+		"kaizencraft:cooked_mutton":
+			return 0.2
+		"kaizencraft:wooden_pickaxe":
+			return 1.0
+		"kaizencraft:furnace":
+			return 3.5
 		_:
 			return 0.6
+
+func _default_attack_damage_for_id(sid: String) -> float:
+	match sid:
+		"kaizencraft:wooden_axe":
+			return 4.0
+		"kaizencraft:wooden_pickaxe":
+			return 3.0
+		_:
+			return 0.5
 
 func _default_tool_for_id(sid: String) -> String:
 	match sid:
 		"kaizencraft:oak_log", "kaizencraft:oak_planks", "kaizencraft:crafting_table":
 			return "axe"
+		"kaizencraft:stone", "kaizencraft:furnace":
+			return "pickaxe"
 		_:
 			return ""
+
+
+
+func _default_item_tool_type_for_id(sid: String) -> String:
+	match sid:
+		"kaizencraft:wooden_axe":
+			return "axe"
+		"kaizencraft:wooden_pickaxe":
+			return "pickaxe"
+		_:
+			return ""
+
+func get_tool_type_for_item(item_id: String) -> String:
+	var def: BlockDef = get_def_by_string(item_id)
+	if def == null:
+		return ""
+	return def.tool_type
+
+func _default_fuel_burn_seconds_for_id(sid: String) -> float:
+	match sid:
+		"kaizencraft:stick":
+			return 5.0
+		"kaizencraft:oak_planks":
+			return 15.0
+		"kaizencraft:oak_log":
+			return 15.0
+		_:
+			return 0.0
+
+func is_item_edible(item_id: String) -> bool:
+	var def: BlockDef = get_def_by_string(item_id)
+	return def != null and def.edible
+
+func get_food_values(item_id: String) -> Dictionary:
+	var def: BlockDef = get_def_by_string(item_id)
+	if def == null:
+		return {"edible": false, "hunger_restore": 0.0, "health_restore": 0.0, "thirst_restore": 0.0}
+	return {
+		"edible": def.edible,
+		"hunger_restore": def.hunger_restore,
+		"health_restore": def.health_restore,
+		"thirst_restore": def.thirst_restore
+	}
+
+func get_fuel_burn_seconds(item_id: String) -> float:
+	var def: BlockDef = get_def_by_string(item_id)
+	if def == null:
+		return 0.0
+	return def.fuel_burn_seconds
 
 func _parse_hex_color(s: String) -> Color:
 	var t: String = s.strip_edges()
@@ -309,7 +409,7 @@ func _looks_block_like(def: BlockDef) -> bool:
 func _creative_category_for_def(def: BlockDef) -> String:
 	if def == null:
 		return "Items"
-	if def.preferred_tool != "" or def.string_id.contains("axe"):
+	if def.preferred_tool != "" or def.string_id.contains("axe") or def.string_id.contains("pickaxe"):
 		return "Tools"
 	if _looks_block_like(def):
 		return "Blocks"

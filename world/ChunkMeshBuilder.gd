@@ -249,6 +249,14 @@ static func _emit_quad(
 		p0 = Vector3(x0, y0, z0); p1 = Vector3(x0, y1, z0); p2 = Vector3(x1, y1, z0); p3 = Vector3(x1, y0, z0)
 		n = Vector3(0, 0, -1)
 
+	if face_material_id == 9:
+		var water_surface_offset: float = 0.06
+		if axis == 1 and dir == +1:
+			p0.y -= water_surface_offset
+			p1.y -= water_surface_offset
+			p2.y -= water_surface_offset
+			p3.y -= water_surface_offset
+
 	var tri_n: Vector3 = (p1 - p0).cross(p2 - p0)
 	if tri_n.dot(n) < 0.0:
 		var tmp: Vector3 = p1

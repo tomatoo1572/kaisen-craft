@@ -33,7 +33,38 @@ func _init() -> void:
 func setup(p_item_id: String, p_count: int, color: Color) -> void:
 	item_id = p_item_id
 	count = max(1, p_count)
-
+	var game: Node = get_node_or_null("/root/Game")
+	var reg: KZ_BlockRegistry = null
+	if game != null and game.has_method("get"):
+		var reg_v: Variant = game.get("block_registry")
+		if reg_v is KZ_BlockRegistry:
+			reg = reg_v as KZ_BlockRegistry
+	if reg != null:
+		var preview: Dictionary = reg.get_preview_paths(item_id)
+		var mode: String = str(preview.get("mode", "item"))
+		var tex_path: String = str(preview.get("side", preview.get("all", preview.get("top", ""))))
+		if mode != "block":
+			tex_path = str(preview.get("all", preview.get("side", preview.get("top", ""))))
+		if tex_path != "" and ResourceLoader.exists(tex_path):
+			var tex: Texture2D = load(tex_path) as Texture2D
+			if tex != null:
+				var mat_tex := StandardMaterial3D.new()
+				mat_tex.albedo_texture = tex
+				mat_tex.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+				mat_tex.cull_mode = BaseMaterial3D.CULL_BACK
+				mat_tex.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+				if mode == "block":
+					var block_box := BoxMesh.new()
+					block_box.size = Vector3(0.30, 0.30, 0.30)
+					_mesh.mesh = block_box
+				else:
+					var quad := QuadMesh.new()
+					quad.size = Vector2(0.30, 0.30)
+					_mesh.mesh = quad
+					_mesh.rotation_degrees = Vector3(0.0, -25.0, 0.0)
+					mat_tex.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				_mesh.material_override = mat_tex
+				return
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED

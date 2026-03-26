@@ -110,6 +110,12 @@ var _drag_slots: Array[int] = []
 var _drag_from_cursor: bool = false
 var _chat_hide_after_sec: float = 25.0
 var _last_chat_activity_ms: int = 0
+var _hud_stats_refresh_timer: float = 0.0
+var _character_preview_initialized: bool = false
+var character_preview_orbit_yaw: float = PI
+var character_preview_orbit_pitch: float = -0.08
+var character_preview_distance: float = 2.35
+var character_preview_dragging: bool = false
 
 func setup(p_player: KZ_Player, p_registry: KZ_BlockRegistry) -> void:
 	player = p_player
@@ -117,6 +123,7 @@ func setup(p_player: KZ_Player, p_registry: KZ_BlockRegistry) -> void:
 	_init_crafting_arrays()
 
 	_build_ui()
+	_apply_revamp_theme()
 	_connect_signals()
 	_connect_chat_bus()
 	_refresh_all()
@@ -135,7 +142,6 @@ func setup(p_player: KZ_Player, p_registry: KZ_BlockRegistry) -> void:
 	_refresh_fov()
 	_refresh_max_fps()
 	_refresh_character_controls_from_player()
-	_refresh_character_preview()
 	_last_chat_activity_ms = Time.get_ticks_msec()
 
 func _init_crafting_arrays() -> void:
@@ -221,12 +227,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
-func _process(_dt: float) -> void:
-	var game_node: Node = _get_game()
-	if game_node != null and game_node.has_method("get_time_display_text") and time_label != null:
-		time_label.text = str(game_node.call("get_time_display_text"))
-	if fps_label != null:
-		fps_label.text = "FPS %d" % Engine.get_frames_per_second()
+func _process(dt: float) -> void:
+	_hud_stats_refresh_timer += dt
+	if _hud_stats_refresh_timer >= 0.2:
+		_hud_stats_refresh_timer = 0.0
+		var game_node: Node = _get_game()
+		if game_node != null and game_node.has_method("get_time_display_text") and time_label != null:
+			time_label.text = str(game_node.call("get_time_display_text"))
+		if fps_label != null:
+			fps_label.text = "FPS %d" % Engine.get_frames_per_second()
 
 	if chat_panel != null:
 		var idle_sec: float = float(Time.get_ticks_msec() - _last_chat_activity_ms) / 1000.0
@@ -816,13 +825,15 @@ func _build_ui() -> void:
 	character_preview_container.custom_minimum_size = Vector2(360, 420)
 	character_preview_container.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	character_preview_container.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	character_preview_container.mouse_filter = Control.MOUSE_FILTER_STOP
+	character_preview_container.gui_input.connect(Callable(self, "_on_character_preview_gui_input"))
 	preview_wrap.add_child(character_preview_container)
 
 	character_preview_viewport = SubViewport.new()
 	character_preview_viewport.size = Vector2i(380, 440)
 	character_preview_viewport.transparent_bg = false
 	character_preview_viewport.own_world_3d = true
-	character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	character_preview_container.add_child(character_preview_viewport)
 
 	character_preview_root = Node3D.new()
@@ -837,9 +848,8 @@ func _build_ui() -> void:
 	character_preview_root.add_child(preview_env)
 
 	character_preview_camera = Camera3D.new()
-	character_preview_camera.position = Vector3(0.0, 1.14, -2.65)
-	character_preview_camera.look_at(Vector3(0.0, 1.08, 0.0), Vector3.UP)
 	character_preview_root.add_child(character_preview_camera)
+	_update_character_preview_camera()
 
 	var preview_light := DirectionalLight3D.new()
 	preview_light.light_energy = 2.2
@@ -851,13 +861,7 @@ func _build_ui() -> void:
 	preview_fill.position = Vector3(0.7, 1.6, 1.8)
 	character_preview_root.add_child(preview_fill)
 
-	var player_model_script: Script = load("res://player/PlayerModel.gd") as Script
-	if player_model_script != null:
-		character_preview_model = player_model_script.new()
-		if character_preview_model != null:
-			character_preview_root.add_child(character_preview_model)
-			if character_preview_model.has_method("set_first_person_hidden"):
-				character_preview_model.call("set_first_person_hidden", false)
+	character_preview_model = null
 
 	var character_controls := VBoxContainer.new()
 	character_controls.custom_minimum_size = Vector2(280, 0)
@@ -1050,6 +1054,187 @@ func _build_ui() -> void:
 	return_button.text = "Return to Main Menu"
 	return_button.pressed.connect(Callable(self, "_on_return_to_menu_pressed"))
 	death_vbox.add_child(return_button)
+
+
+func _apply_revamp_theme() -> void:
+	if root == null:
+		return
+
+	var top_band := ColorRect.new()
+	top_band.anchor_left = 0.5
+	top_band.anchor_right = 0.5
+	top_band.offset_left = -250
+	top_band.offset_right = 250
+	top_band.offset_top = 12
+	top_band.offset_bottom = 46
+	top_band.color = Color(0.06, 0.065, 0.09, 0.78)
+	root.add_child(top_band)
+	root.move_child(top_band, 0)
+
+	var top_band_line := ColorRect.new()
+	top_band_line.anchor_left = 0.5
+	top_band_line.anchor_right = 0.5
+	top_band_line.offset_left = -250
+	top_band_line.offset_right = 250
+	top_band_line.offset_top = 46
+	top_band_line.offset_bottom = 49
+	top_band_line.color = Color(0.68, 0.18, 0.24, 0.92)
+	root.add_child(top_band_line)
+	root.move_child(top_band_line, 1)
+
+	var version_label := Label.new()
+	version_label.text = "KAISENCRAFT 0.0.1"
+	version_label.anchor_left = 0.5
+	version_label.anchor_right = 0.5
+	version_label.offset_left = -190
+	version_label.offset_right = 190
+	version_label.offset_top = 17
+	version_label.offset_bottom = 41
+	version_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	version_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	version_label.add_theme_color_override("font_color", Color(0.94, 0.94, 0.98, 0.96))
+	version_label.add_theme_font_size_override("font_size", 18)
+	root.add_child(version_label)
+
+	_style_control_tree(root)
+
+	if crosshair != null:
+		crosshair.add_theme_color_override("font_color", Color(0.96, 0.96, 1.0, 0.84))
+		crosshair.add_theme_font_size_override("font_size", 18)
+
+	if chat_log != null:
+		chat_log.add_theme_color_override("default_color", Color(0.93, 0.93, 0.97, 1.0))
+
+func _style_control_tree(node: Node) -> void:
+	if node is PanelContainer:
+		_style_panel_container(node as PanelContainer)
+	elif node is Panel:
+		_style_panel(node as Panel)
+	elif node is Button:
+		_style_button(node as Button)
+	elif node is LineEdit:
+		_style_line_edit(node as LineEdit)
+	elif node is ProgressBar:
+		_style_progress_bar(node as ProgressBar)
+	elif node is RichTextLabel:
+		_style_rich_text(node as RichTextLabel)
+	elif node is ItemList:
+		_style_item_list(node as ItemList)
+	elif node is Label:
+		_style_label(node as Label)
+	for child in node.get_children():
+		_style_control_tree(child)
+
+func _style_panel_container(panel: PanelContainer) -> void:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.06, 0.065, 0.09, 0.76)
+	sb.border_color = Color(0.62, 0.18, 0.24, 0.88)
+	sb.border_width_left = 2
+	sb.border_width_top = 2
+	sb.border_width_right = 2
+	sb.border_width_bottom = 2
+	sb.corner_radius_top_left = 10
+	sb.corner_radius_top_right = 10
+	sb.corner_radius_bottom_left = 10
+	sb.corner_radius_bottom_right = 10
+	panel.add_theme_stylebox_override("panel", sb)
+
+func _style_panel(panel: Panel) -> void:
+	var sb := StyleBoxFlat.new()
+	sb.bg_color = Color(0.08, 0.09, 0.12, 0.50)
+	sb.border_color = Color(0.56, 0.18, 0.24, 0.55)
+	sb.border_width_left = 2
+	sb.border_width_top = 2
+	sb.border_width_right = 2
+	sb.border_width_bottom = 2
+	sb.corner_radius_top_left = 8
+	sb.corner_radius_top_right = 8
+	sb.corner_radius_bottom_left = 8
+	sb.corner_radius_bottom_right = 8
+	panel.add_theme_stylebox_override("panel", sb)
+
+func _style_button(button: Button) -> void:
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.11, 0.12, 0.16, 0.94)
+	normal.border_color = Color(0.62, 0.2, 0.26, 0.82)
+	normal.border_width_left = 2
+	normal.border_width_top = 2
+	normal.border_width_right = 2
+	normal.border_width_bottom = 2
+	normal.corner_radius_top_left = 8
+	normal.corner_radius_top_right = 8
+	normal.corner_radius_bottom_left = 8
+	normal.corner_radius_bottom_right = 8
+	var hover := normal.duplicate() as StyleBoxFlat
+	hover.bg_color = Color(0.16, 0.17, 0.22, 0.98)
+	hover.border_color = Color(0.88, 0.3, 0.36, 0.96)
+	var pressed := normal.duplicate() as StyleBoxFlat
+	pressed.bg_color = Color(0.08, 0.09, 0.13, 1.0)
+	pressed.border_color = Color(0.94, 0.4, 0.46, 1.0)
+	button.add_theme_stylebox_override("normal", normal)
+	button.add_theme_stylebox_override("hover", hover)
+	button.add_theme_stylebox_override("pressed", pressed)
+	button.add_theme_stylebox_override("focus", hover)
+	button.add_theme_color_override("font_color", Color(0.94, 0.94, 0.98, 1.0))
+	button.add_theme_color_override("font_hover_color", Color(1.0, 1.0, 1.0, 1.0))
+	button.add_theme_color_override("font_focus_color", Color(1.0, 1.0, 1.0, 1.0))
+
+func _style_line_edit(edit: LineEdit) -> void:
+	var normal := StyleBoxFlat.new()
+	normal.bg_color = Color(0.08, 0.085, 0.12, 0.98)
+	normal.border_color = Color(0.40, 0.44, 0.56, 0.80)
+	normal.border_width_left = 2
+	normal.border_width_top = 2
+	normal.border_width_right = 2
+	normal.border_width_bottom = 2
+	normal.corner_radius_top_left = 8
+	normal.corner_radius_top_right = 8
+	normal.corner_radius_bottom_left = 8
+	normal.corner_radius_bottom_right = 8
+	var focus := normal.duplicate() as StyleBoxFlat
+	focus.border_color = Color(0.86, 0.3, 0.36, 0.98)
+	edit.add_theme_stylebox_override("normal", normal)
+	edit.add_theme_stylebox_override("focus", focus)
+	edit.add_theme_color_override("font_color", Color(0.94, 0.94, 0.98, 1.0))
+	edit.add_theme_color_override("placeholder_color", Color(0.65, 0.68, 0.76, 0.72))
+
+func _style_progress_bar(bar: ProgressBar) -> void:
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0.14, 0.14, 0.18, 0.92)
+	bg.corner_radius_top_left = 8
+	bg.corner_radius_top_right = 8
+	bg.corner_radius_bottom_left = 8
+	bg.corner_radius_bottom_right = 8
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color(0.72, 0.18, 0.26, 0.94)
+	fill.corner_radius_top_left = 8
+	fill.corner_radius_top_right = 8
+	fill.corner_radius_bottom_left = 8
+	fill.corner_radius_bottom_right = 8
+	bar.add_theme_stylebox_override("background", bg)
+	bar.add_theme_stylebox_override("fill", fill)
+
+func _style_rich_text(rich: RichTextLabel) -> void:
+	rich.add_theme_color_override("default_color", Color(0.93, 0.93, 0.97, 1.0))
+
+func _style_item_list(list: ItemList) -> void:
+	var panel := StyleBoxFlat.new()
+	panel.bg_color = Color(0.08, 0.085, 0.12, 0.96)
+	panel.border_color = Color(0.42, 0.46, 0.58, 0.85)
+	panel.border_width_left = 2
+	panel.border_width_top = 2
+	panel.border_width_right = 2
+	panel.border_width_bottom = 2
+	panel.corner_radius_top_left = 10
+	panel.corner_radius_top_right = 10
+	panel.corner_radius_bottom_left = 10
+	panel.corner_radius_bottom_right = 10
+	list.add_theme_stylebox_override("panel", panel)
+	list.add_theme_color_override("font_color", Color(0.94, 0.94, 0.98, 1.0))
+
+func _style_label(label: Label) -> void:
+	label.add_theme_color_override("font_color", Color(0.94, 0.94, 0.98, 0.98))
 
 func _connect_signals() -> void:
 	if player == null:
@@ -1359,8 +1544,32 @@ func _update_character_value_labels() -> void:
 	if character_weight_value_label != null and character_weight_slider != null:
 		character_weight_value_label.text = "%.2f" % character_weight_slider.value
 
+func _ensure_character_preview_model() -> void:
+	if _character_preview_initialized:
+		return
+	if character_preview_root == null:
+		return
+	var player_model_script: Script = load("res://player/PlayerModel.gd") as Script
+	if player_model_script == null:
+		return
+	character_preview_model = player_model_script.new()
+	if character_preview_model == null:
+		return
+	character_preview_root.add_child(character_preview_model)
+	if character_preview_model.has_method("set_first_person_hidden"):
+		character_preview_model.call("set_first_person_hidden", false)
+	if character_preview_model is Node3D:
+		(character_preview_model as Node3D).rotation.y = 0.0
+	_update_character_preview_camera()
+	_character_preview_initialized = true
+
 func _refresh_character_preview() -> void:
-	if character_preview_model == null or player == null:
+	if character_panel != null and not character_panel.visible:
+		return
+	if player == null:
+		return
+	_ensure_character_preview_model()
+	if character_preview_model == null:
 		return
 	var app_script: Script = load("res://player/CharacterAppearance.gd") as Script
 	if app_script == null:
@@ -1374,6 +1583,9 @@ func _refresh_character_preview() -> void:
 			character_preview_model.call("apply_profile")
 	if character_preview_model.has_method("set_first_person_hidden"):
 		character_preview_model.call("set_first_person_hidden", false)
+	_update_character_preview_camera()
+	if character_preview_viewport != null:
+		character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 func _apply_character_ui_changes() -> void:
 	if player == null:
@@ -1404,6 +1616,11 @@ func _set_character_open(open: bool) -> void:
 	if character_panel == null:
 		return
 	character_panel.visible = open
+	if character_preview_viewport != null:
+		if open:
+			character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+		else:
+			character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	if open:
 		settings_panel.visible = false
 		controls_panel.visible = false
@@ -1421,6 +1638,40 @@ func _set_character_open(open: bool) -> void:
 			crosshair.visible = not player.inventory_is_open and not player.chat_is_open and not player.settings_is_open and not player.is_dead
 		else:
 			crosshair.visible = true
+
+func _update_character_preview_camera() -> void:
+	if character_preview_camera == null:
+		return
+	var target: Vector3 = Vector3(0.0, 1.02, 0.0)
+	var horiz: float = cos(character_preview_orbit_pitch) * character_preview_distance
+	var cam_offset := Vector3(sin(character_preview_orbit_yaw) * horiz, sin(character_preview_orbit_pitch) * character_preview_distance, cos(character_preview_orbit_yaw) * horiz)
+	character_preview_camera.position = target + cam_offset
+	character_preview_camera.look_at(target, Vector3.UP)
+
+func _on_character_preview_gui_input(event: InputEvent) -> void:
+	if character_panel == null or not character_panel.visible:
+		return
+	if event is InputEventMouseButton:
+		var mb: InputEventMouseButton = event as InputEventMouseButton
+		if mb.button_index == MouseButton.MOUSE_BUTTON_LEFT:
+			character_preview_dragging = mb.pressed
+		elif mb.pressed and mb.button_index == MouseButton.MOUSE_BUTTON_WHEEL_UP:
+			character_preview_distance = maxf(1.6, character_preview_distance - 0.12)
+			_update_character_preview_camera()
+			if character_preview_viewport != null:
+				character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+		elif mb.pressed and mb.button_index == MouseButton.MOUSE_BUTTON_WHEEL_DOWN:
+			character_preview_distance = minf(3.4, character_preview_distance + 0.12)
+			_update_character_preview_camera()
+			if character_preview_viewport != null:
+				character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
+	elif event is InputEventMouseMotion and character_preview_dragging:
+		var mm: InputEventMouseMotion = event as InputEventMouseMotion
+		character_preview_orbit_yaw = wrapf(character_preview_orbit_yaw - mm.relative.x * 0.01, -PI, PI)
+		character_preview_orbit_pitch = clampf(character_preview_orbit_pitch - mm.relative.y * 0.01, deg_to_rad(-35.0), deg_to_rad(20.0))
+		_update_character_preview_camera()
+		if character_preview_viewport != null:
+			character_preview_viewport.render_target_update_mode = SubViewport.UPDATE_ONCE
 
 func _refresh_all() -> void:
 	_refresh_hotbar()

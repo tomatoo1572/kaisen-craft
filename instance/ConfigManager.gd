@@ -34,8 +34,11 @@ func ensure_defaults(instance_root: String) -> void:
 				"starting_thirst": 20.0,
 				"hunger_drain_interval_sec": 35.0,
 				"thirst_drain_interval_sec": 28.0,
-				"day_duration_sec": 900.0,
-				"night_duration_sec": 1200.0,
+				"day_duration_sec": 840.0,
+				"night_duration_sec": 600.0,
+				"time_speed_multiplier": 1.0,
+				"max_time_speed_multiplier": 240.0,
+				"use_real_time_24h_clock": true,
 				"fov": 75.0,
 				"max_fps": 0
 			}
@@ -51,6 +54,13 @@ func ensure_defaults(instance_root: String) -> void:
 				"chunk_size_y": 256,
 				"chunk_size_z": 16,
 				"view_distance_chunks": 6,
+				"max_worker_threads": 2,
+				"cache_max_chunks": 320,
+				"request_budget_per_frame": 10,
+				"initial_burst_target_loaded": 48,
+				"initial_burst_budget_per_frame": 24,
+				"unload_budget_per_frame": 1,
+				"keep_loaded_margin": 2,
 				"seed": 1337,
 				"frequency": 0.008,
 				"base_height": 64,
@@ -135,6 +145,7 @@ func _ensure_default_block_files(blocks_dir: String) -> void:
 			"required_tool": "none",
 			"drops": [{"item": "kaizencraft:oak_log", "count": 1}],
 			"transparency": false,
+			"fuel_burn_seconds": 15.0,
 			"light_level": 0
 		}
 	)
@@ -212,6 +223,7 @@ func _ensure_default_item_files(items_dir: String) -> void:
 			"placeable": true,
 			"stack_size": 64,
 			"transparency": false,
+			"fuel_burn_seconds": 15.0,
 			"light_level": 0
 		}
 	)
@@ -226,6 +238,7 @@ func _ensure_default_item_files(items_dir: String) -> void:
 			"placeable": false,
 			"stack_size": 64,
 			"transparency": true,
+			"fuel_burn_seconds": 5.0,
 			"light_level": 0
 		}
 	)
@@ -258,6 +271,90 @@ func _ensure_default_item_files(items_dir: String) -> void:
 			"placeable": false,
 			"stack_size": 1,
 			"transparency": true,
+			"tool_type": "axe",
+			"combat_damage": 4.0,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(items_dir, "furnace.json"),
+		{
+			"id": "kaizencraft:furnace",
+			"name": "Furnace",
+			"textures": {
+				"side": "res://assets/textures/blocks/furnace_side.png",
+				"top": "res://assets/textures/blocks/furnace_top.png",
+				"bottom": "res://assets/textures/blocks/furnace_top.png"
+			},
+			"tint": "#8b8b8b",
+			"placeable": true,
+			"stack_size": 64,
+			"transparency": false,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(items_dir, "wooden_pickaxe.json"),
+		{
+			"id": "kaizencraft:wooden_pickaxe",
+			"name": "Wooden Pickaxe",
+			"textures": {"all": "res://assets/textures/blocks/wooden_pickaxe.png"},
+			"tint": "#b98c55",
+			"placeable": false,
+			"stack_size": 1,
+			"transparency": true,
+			"tool_type": "pickaxe",
+			"combat_damage": 3.0,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(items_dir, "wool.json"),
+		{
+			"id": "kaizencraft:wool",
+			"name": "Wool",
+			"textures": {"all": "res://assets/textures/items/wool.png"},
+			"tint": "#f1eee7",
+			"placeable": false,
+			"stack_size": 64,
+			"transparency": true,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(items_dir, "mutton.json"),
+		{
+			"id": "kaizencraft:mutton",
+			"name": "Raw Mutton",
+			"textures": {"all": "res://assets/textures/items/mutton.png"},
+			"tint": "#b5655f",
+			"placeable": false,
+			"stack_size": 64,
+			"transparency": true,
+			"edible": true,
+			"hunger_restore": 2.0,
+			"health_restore": 1.0,
+			"light_level": 0
+		}
+	)
+
+	_ensure_block_file(
+		KZ_PathUtil.join(items_dir, "cooked_mutton.json"),
+		{
+			"id": "kaizencraft:cooked_mutton",
+			"name": "Cooked Mutton",
+			"textures": {"all": "res://assets/textures/items/cooked_mutton.png"},
+			"tint": "#c07b62",
+			"placeable": false,
+			"stack_size": 64,
+			"transparency": true,
+			"edible": true,
+			"hunger_restore": 6.0,
+			"health_restore": 2.0,
 			"light_level": 0
 		}
 	)
@@ -301,6 +398,24 @@ func _ensure_default_recipe_file(path: String) -> void:
 				",kaizencraft:oak_planks,kaizencraft:oak_planks",
 				",kaizencraft:stick,kaizencraft:oak_planks",
 				"kaizencraft:stick,,"
+			]
+		},
+		{
+			"output": "kaizencraft:wooden_pickaxe",
+			"count": 1,
+			"pattern": [
+				"kaizencraft:oak_planks,kaizencraft:oak_planks,kaizencraft:oak_planks",
+				",kaizencraft:stick,",
+				",kaizencraft:stick,"
+			]
+		},
+		{
+			"output": "kaizencraft:furnace",
+			"count": 1,
+			"pattern": [
+				"kaizencraft:stone,kaizencraft:stone,kaizencraft:stone",
+				"kaizencraft:stone,,kaizencraft:stone",
+				"kaizencraft:stone,kaizencraft:stone,kaizencraft:stone"
 			]
 		}
 	]

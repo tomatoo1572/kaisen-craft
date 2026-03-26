@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_disabled, depth_draw_opaque;
+render_mode cull_back, depth_draw_opaque;
 
 uniform sampler2D grass_side_tex : source_color, repeat_enable, filter_nearest;
 uniform sampler2D grass_top_tex : source_color, repeat_enable, filter_nearest;
@@ -34,11 +34,11 @@ vec4 sample_face_tex(int face_id, vec2 uv) {
 }
 
 float cel_band(float v) {
-	if (v > 0.90) { return 1.00; }
-	if (v > 0.65) { return 0.86; }
-	if (v > 0.35) { return 0.68; }
-	if (v > 0.12) { return 0.52; }
-	return 0.40;
+	if (v > 0.92) { return 1.00; }
+	if (v > 0.68) { return 0.84; }
+	if (v > 0.36) { return 0.66; }
+	if (v > 0.14) { return 0.50; }
+	return 0.36;
 }
 
 void fragment() {
@@ -49,10 +49,10 @@ void fragment() {
 	float moon_lambert = max(dot(n, normalize(-moon_dir)), 0.0);
 	float sun_term = cel_band(sun_lambert) * sun_strength;
 	float moon_term = cel_band(moon_lambert) * moon_strength;
-	float top_bias = 0.86 + max(n.y, 0.0) * 0.20;
-	vec3 lighting = ambient_tint * 0.88;
-	lighting += vec3(1.12, 1.04, 0.96) * sun_term * 0.94;
-	lighting += vec3(0.72, 0.80, 1.02) * moon_term * 0.40;
+	float top_bias = 0.86 + max(n.y, 0.0) * 0.14;
+	vec3 lighting = ambient_tint * 0.74;
+	lighting += vec3(1.00, 0.98, 0.94) * sun_term * 0.72;
+	lighting += vec3(0.62, 0.70, 0.92) * moon_term * 0.30;
 	ALBEDO = texel.rgb * day_night_tint * lighting * top_bias;
 	ALPHA = 1.0;
 	ROUGHNESS = 1.0;

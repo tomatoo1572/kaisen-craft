@@ -14,9 +14,14 @@ var _chunks: Dictionary = {}
 var _requested: Dictionary = {}
 var _retry_after_ms: Dictionary = {}
 
-var request_budget_per_frame: int = 2
-var initial_burst_target_loaded: int = 8
-var initial_burst_budget_per_frame: int = 3
+var request_budget_per_frame: int = 12
+var initial_burst_target_loaded: int = 48
+var initial_burst_budget_per_frame: int = 24
+var unload_budget_per_frame: int = 1
+var keep_loaded_margin: int = 2
+
+var _texture_cache: Dictionary = {}
+var _chunk_script: Script
 
 var debug_wireframe: bool = false
 var _terrain_mat: Material
@@ -41,7 +46,13 @@ func setup(p_server, p_worldgen_cfg: Dictionary) -> void:
 		int(wg.get("chunk_size_y", 256)),
 		int(wg.get("chunk_size_z", 16))
 	)
-	view_distance = int(wg.get("view_distance_chunks", 6))
+	view_distance = maxi(int(wg.get("view_distance_chunks", 6)), 6)
+	request_budget_per_frame = clampi(maxi(int(wg.get("request_budget_per_frame", request_budget_per_frame)), 10), 6, 32)
+	initial_burst_target_loaded = clampi(maxi(int(wg.get("initial_burst_target_loaded", initial_burst_target_loaded)), 40), 24, 128)
+	initial_burst_budget_per_frame = clampi(maxi(int(wg.get("initial_burst_budget_per_frame", initial_burst_budget_per_frame)), 20), request_budget_per_frame, 48)
+	unload_budget_per_frame = clampi(int(wg.get("unload_budget_per_frame", unload_budget_per_frame)), 1, 6)
+	keep_loaded_margin = clampi(maxi(int(wg.get("keep_loaded_margin", keep_loaded_margin)), 2), 1, 4)
+	_chunk_script = load(CHUNK_SCRIPT_PATH) as Script
 
 	_build_chunk_materials()
 
@@ -81,8 +92,8 @@ func _build_chunk_materials() -> void:
 		var water_fallback := StandardMaterial3D.new()
 		water_fallback.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		water_fallback.cull_mode = BaseMaterial3D.CULL_DISABLED
-		water_fallback.albedo_color = Color(0.36, 0.62, 0.95, 0.72)
-		water_fallback.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		water_fallback.albedo_color = Color(0.36, 0.62, 0.95, 1.0)
+		water_fallback.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 		water_fallback.texture_repeat = true
 		water_fallback.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST as BaseMaterial3D.TextureFilter
 		_water_mat = water_fallback
@@ -117,7 +128,12 @@ func _build_shader_material(shader_path: String) -> Material:
 func _load_tex(path: String) -> Texture2D:
 	if path == "" or not ResourceLoader.exists(path):
 		return null
-	return load(path) as Texture2D
+	if _texture_cache.has(path):
+		return _texture_cache[path] as Texture2D
+	var tex: Texture2D = load(path) as Texture2D
+	if tex != null:
+		_texture_cache[path] = tex
+	return tex
 
 
 func set_day_night_tint(tint: Color) -> void:
@@ -172,6 +188,7 @@ func _process(_dt: float) -> void:
 
 	var pc: Vector2i = _world_to_chunk(player.global_position)
 	var needed: Dictionary = _compute_needed(pc, view_distance)
+	var keep_needed: Dictionary = _compute_needed(pc, view_distance + keep_loaded_margin)
 
 	var to_request: Array[Vector2i] = []
 	var now_ms: int = Time.get_ticks_msec()
@@ -199,6 +216,11 @@ func _process(_dt: float) -> void:
 	var budget: int = request_budget_per_frame
 	if _chunks.size() < initial_burst_target_loaded:
 		budget = initial_burst_budget_per_frame
+	var player_speed: float = 0.0
+	if player is CharacterBody3D:
+		player_speed = (player as CharacterBody3D).velocity.length()
+	if player_speed > 8.0:
+		budget = maxi(budget, initial_burst_budget_per_frame + 8)
 
 	var count: int = 0
 	for c in to_request:
@@ -215,14 +237,18 @@ func _process(_dt: float) -> void:
 		if typeof(c_v2) != TYPE_VECTOR2I:
 			continue
 		var c2: Vector2i = c_v2 as Vector2i
-		if not needed.has(c2):
+		if not keep_needed.has(c2):
 			to_unload.append(c2)
 
+	var unload_count: int = 0
 	for c3 in to_unload:
+		if unload_count >= unload_budget_per_frame:
+			break
 		var ch: Node = _chunks[c3] as Node
 		_chunks.erase(c3)
 		if ch != null:
 			ch.queue_free()
+		unload_count += 1
 
 func _on_chunk_ready(result: Dictionary) -> void:
 	var cpos: Vector2i = Vector2i.ZERO
@@ -254,12 +280,13 @@ func _on_chunk_ready(result: Dictionary) -> void:
 		return
 	var arrays: Dictionary = arrays_v as Dictionary
 
-	var chunk_script: Script = load(CHUNK_SCRIPT_PATH) as Script
-	if chunk_script == null:
+	if _chunk_script == null:
+		_chunk_script = load(CHUNK_SCRIPT_PATH) as Script
+	if _chunk_script == null:
 		push_error("Failed to load Chunk script: %s" % CHUNK_SCRIPT_PATH)
 		return
 
-	var ch: Variant = chunk_script.new()
+	var ch: Variant = _chunk_script.new()
 	if ch == null:
 		push_error("Failed to instantiate Chunk from: %s" % CHUNK_SCRIPT_PATH)
 		return
@@ -387,10 +414,8 @@ func _world_to_chunk(pos: Vector3) -> Vector2i:
 
 func _compute_needed(center: Vector2i, radius: int) -> Dictionary:
 	var needed_map: Dictionary = {}
-	var r2: int = radius * radius
 	for dz in range(-radius, radius + 1):
 		for dx in range(-radius, radius + 1):
-			if dx * dx + dz * dz <= r2:
-				var p := Vector2i(center.x + dx, center.y + dz)
-				needed_map[p] = true
+			var p := Vector2i(center.x + dx, center.y + dz)
+			needed_map[p] = true
 	return needed_map

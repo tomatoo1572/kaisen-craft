@@ -163,14 +163,15 @@ func _apply_preview(preview: Dictionary, tint: Color) -> void:
 
 func _update_border(is_selected: bool) -> void:
 	var sb := StyleBoxFlat.new()
-	sb.bg_color = Color(0, 0, 0, 0.35)
+	sb.bg_color = Color(0.06, 0.065, 0.09, 0.86)
 	sb.border_width_left = 2
 	sb.border_width_top = 2
 	sb.border_width_right = 2
 	sb.border_width_bottom = 2
-	sb.border_color = Color(1, 1, 1, 0.95) if is_selected else Color(1, 1, 1, 0.25)
-	sb.corner_radius_top_left = 6
-	sb.corner_radius_top_right = 6
-	sb.corner_radius_bottom_left = 6
-	sb.corner_radius_bottom_right = 6
+	sb.border_color = Color(0.94, 0.34, 0.40, 0.98) if is_selected else Color(0.92, 0.92, 0.98, 0.28)
+	sb.corner_radius_top_left = 8
+	sb.corner_radius_top_right = 8
+	sb.corner_radius_bottom_left = 8
+	sb.corner_radius_bottom_right = 8
 	_border.add_theme_stylebox_override("panel", sb)
+	_count_label.add_theme_color_override("font_color", Color(0.98, 0.98, 1.0, 1.0))

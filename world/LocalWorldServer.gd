@@ -652,6 +652,19 @@ func _queue_adjacent_chunk_refreshes(chunk_pos: Vector2i) -> void:
 		if _cache.has(npos):
 			_schedule_remesh_front(npos)
 
+func _noise_height(noise: FastNoiseLite, wx: int, wz: int, base_h: int, scale_h: int, max_y: int) -> int:
+	var n: float = noise.get_noise_2d(float(wx), float(wz))
+	var h: int = int(round(float(base_h) + n * float(scale_h)))
+	return clampi(h, 1, max_y - 2)
+
+func _build_column_heights(noise: FastNoiseLite, origin_x: int, origin_z: int, sx: int, sz: int, max_y: int, base_h: int, scale_h: int) -> PackedInt32Array:
+	var heights := PackedInt32Array()
+	heights.resize(sx * sz)
+	for z in range(sz):
+		for x in range(sx):
+			heights[x + z * sx] = _noise_height(noise, origin_x + x, origin_z + z, base_h, scale_h, max_y)
+	return heights
+
 # ----------------------------
 # Generation + mesh threads
 # ----------------------------
@@ -663,11 +676,15 @@ func _on_chunk_generated(chunk_pos: Vector2i, result_v: Variant) -> void:
 
 	var result: Dictionary = result_v as Dictionary
 	_cache[chunk_pos] = result
+	if _cache_order.has(chunk_pos):
+		_cache_order.erase(chunk_pos)
 	_cache_order.append(chunk_pos)
 
 	while _cache_order.size() > cache_max_chunks:
 		var old: Vector2i = _cache_order.pop_front()
 		_cache.erase(old)
+		_mesh_dirty.erase(old)
+		_mesh_revision.erase(old)
 
 	_queue_adjacent_chunk_refreshes(chunk_pos)
 
@@ -724,19 +741,22 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	var idx := func(x: int, y: int, z: int) -> int:
 		return x + z * sx + y * sx * sz
 
+	var heights: PackedInt32Array = _build_column_heights(noise, origin_x, origin_z, sx, sz, local_dims.y, base_h, scale_h)
 	var height_at := func(wx: int, wz: int) -> int:
-		var n: float = noise.get_noise_2d(float(wx), float(wz))
-		var h: int = int(round(float(base_h) + n * float(scale_h)))
-		return clampi(h, 1, local_dims.y - 2)
+		var lx_local: int = wx - origin_x
+		var lz_local: int = wz - origin_z
+		if lx_local >= 0 and lx_local < sx and lz_local >= 0 and lz_local < sz:
+			return int(heights[lx_local + lz_local * sx])
+		return _noise_height(noise, wx, wz, base_h, scale_h, local_dims.y)
 
 	var vox := PackedByteArray()
 	vox.resize(sx * sy * sz)
 
 	for z in range(sz):
 		for x in range(sx):
-			var wx: int = origin_x + x
-			var wz: int = origin_z + z
-			var hh: int = int(height_at.call(wx, wz))
+			var _wx: int = origin_x + x
+			var _wz: int = origin_z + z
+			var hh: int = int(heights[x + z * sx])
 			var top_id: int = grass_id if hh > local_sea_level + 1 else sand_id
 			for y in range(sy):
 				if y > hh:
@@ -779,6 +799,8 @@ func _thread_generate_chunk(chunk_pos: Vector2i, cfg: Dictionary) -> Dictionary:
 	# World sampler with neighbor support and deterministic fallback for uncached neighbors.
 	var generated_block_at := func(wx: int, wy: int, wz: int) -> int:
 		var hh2: int = int(height_at.call(wx, wz))
+		if wy > hh2 + 12:
+			return 0
 		var top_id2: int = grass_id if hh2 > local_sea_level + 1 else sand_id
 		if wy <= hh2:
 			if wy == hh2:
@@ -915,13 +937,18 @@ func _build_mesh_result(chunk_pos: Vector2i, payload: Dictionary) -> Dictionary:
 	var idx := func(x: int, y: int, z: int) -> int:
 		return x + z * sx + y * sx * sz
 
+	var heights: PackedInt32Array = _build_column_heights(noise, origin_x, origin_z, sx, sz, local_dims.y, base_h, scale_h)
 	var height_at := func(wx: int, wz: int) -> int:
-		var n: float = noise.get_noise_2d(float(wx), float(wz))
-		var h: int = int(round(float(base_h) + n * float(scale_h)))
-		return clampi(h, 1, local_dims.y - 2)
+		var lx_local: int = wx - origin_x
+		var lz_local: int = wz - origin_z
+		if lx_local >= 0 and lx_local < sx and lz_local >= 0 and lz_local < sz:
+			return int(heights[lx_local + lz_local * sx])
+		return _noise_height(noise, wx, wz, base_h, scale_h, local_dims.y)
 
 	var generated_block_at := func(wx: int, wy: int, wz: int) -> int:
 		var hh: int = int(height_at.call(wx, wz))
+		if wy > hh + 12:
+			return 0
 		var top_id: int = grass_id if hh > local_sea_level + 1 else sand_id
 		if wy <= hh:
 			if wy == hh:
