@@ -1,0 +1,5 @@
+v74 hotfix 4
+- fixed first-person camera being placed too low
+- camera height now comes from overall body height instead of head sub-aabb
+- width no longer changes eye position or forward offset
+- body-visible first-person visual root moved slightly down/back for a more natural eye-level view

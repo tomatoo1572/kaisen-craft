@@ -2,7 +2,6 @@ extends Node
 class_name KZ_Game
 
 const WORLD_MANAGER_SCRIPT_PATH := "res://world/WorldManager.gd"
-const VOXEL_WORLD_MANAGER_SCRIPT_PATH := "res://world/VoxelWorldManager.gd"
 const LOCAL_WORLD_SERVER_SCRIPT_PATH := "res://world/LocalWorldServer.gd"
 const CHAT_BUS_SCRIPT_PATH := "res://chat/ChatBus.gd"
 const CONTROLS_FILE_NAME := "controls.json"
@@ -73,6 +72,14 @@ var _sun_dir_current: Vector3 = Vector3(0.25, 1.0, -0.28).normalized()
 var _moon_dir_current: Vector3 = Vector3(-0.25, 1.0, 0.24).normalized()
 var _sun_strength_current: float = 1.0
 var _moon_strength_current: float = 0.0
+var weather_root: Node3D
+var rain_particles: GPUParticles3D
+var current_weather: String = "clear"
+var weather_timer: float = 0.0
+var weather_duration: float = 70.0
+var wind_direction: Vector3 = Vector3(0.8, 0.0, 0.25).normalized()
+var wind_strength: float = 0.20
+var lightning_flash: float = 0.0
 var keep_inventory_enabled: bool = false
 var game_mode: String = "survival"
 var _recipe_cache: Array[Dictionary] = []
@@ -94,6 +101,7 @@ func _process(dt: float) -> void:
 	if not is_session_active or world_manager == null:
 		return
 	_update_day_night(dt * time_speed_multiplier)
+	_update_weather(dt)
 
 func start_singleplayer(p_instance_name: String = "default", p_world_name: String = "world1") -> bool:
 	if is_session_active:
@@ -150,14 +158,13 @@ func start_singleplayer(p_instance_name: String = "default", p_world_name: Strin
 	add_child(chat_bus)
 	chat_bus.setup(world_name, DEFAULT_PROXIMITY_CHAT_RADIUS_BLOCKS)
 
-	var world_manager_path: String = VOXEL_WORLD_MANAGER_SCRIPT_PATH if ClassDB.can_instantiate("VoxelTerrain") else WORLD_MANAGER_SCRIPT_PATH
-	var world_manager_script: Script = load(world_manager_path) as Script
+	var world_manager_script: Script = load(WORLD_MANAGER_SCRIPT_PATH) as Script
 	if world_manager_script == null:
-		push_error("Failed to load WorldManager script: %s" % world_manager_path)
+		push_error("Failed to load WorldManager script: %s" % WORLD_MANAGER_SCRIPT_PATH)
 		return false
 	world_manager = world_manager_script.new()
 	if world_manager == null:
-		push_error("Failed to instantiate WorldManager from: %s" % world_manager_path)
+		push_error("Failed to instantiate WorldManager from: %s" % WORLD_MANAGER_SCRIPT_PATH)
 		return false
 	scene.add_child(world_manager)
 	world_manager.setup(server, config_manager.worldgen)
@@ -893,6 +900,7 @@ func _setup_world_visuals(scene: Node) -> void:
 	sky_anchor.add_child(moon_sprite)
 
 	_setup_clouds()
+	_setup_weather_visuals(scene)
 
 func _smooth01(t: float) -> float:
 	var c: float = clampf(t, 0.0, 1.0)
@@ -915,41 +923,166 @@ func _setup_clouds() -> void:
 	sky_anchor.add_child(cloud_root)
 	cloud_sprites.clear()
 	cloud_base_positions.clear()
-	var cloud_tex: Texture2D = load("res://assets/textures/sky/clouds.png") as Texture2D
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 13371337
-	for i in range(18):
-		var sprite := Sprite3D.new()
-		sprite.texture = cloud_tex
-		sprite.billboard = BaseMaterial3D.BILLBOARD_DISABLED
-		sprite.rotation_degrees = Vector3(-90.0, 0.0, 0.0)
-		sprite.pixel_size = rng.randf_range(0.90, 1.35)
-		var local_pos: Vector3 = Vector3(rng.randf_range(-240.0, 240.0), rng.randf_range(0.0, 18.0), rng.randf_range(-240.0, 240.0))
-		sprite.position = local_pos
-		sprite.modulate = Color(1.0, 1.0, 1.0, 0.0)
-		cloud_root.add_child(sprite)
-		cloud_sprites.append(sprite)
+	for i in range(14):
+		var cluster := Node3D.new()
+		var local_pos: Vector3 = Vector3(rng.randf_range(-260.0, 260.0), rng.randf_range(0.0, 14.0), rng.randf_range(-260.0, 260.0))
+		cluster.position = local_pos
+		for j in range(rng.randi_range(3, 5)):
+			var puff := MeshInstance3D.new()
+			var box := BoxMesh.new()
+			box.size = Vector3(rng.randf_range(16.0, 34.0), rng.randf_range(1.2, 3.0), rng.randf_range(10.0, 22.0))
+			puff.mesh = box
+			puff.position = Vector3(rng.randf_range(-10.0, 10.0), rng.randf_range(-1.2, 1.2), rng.randf_range(-8.0, 8.0))
+			var mat := StandardMaterial3D.new()
+			mat.albedo_color = Color(1.0, 1.0, 1.0, 0.64)
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+			mat.cull_mode = BaseMaterial3D.CULL_BACK
+			mat.roughness = 1.0
+			puff.material_override = mat
+			cluster.add_child(puff)
+		cloud_root.add_child(cluster)
+		cloud_sprites.append(cluster)
 		cloud_base_positions.append(local_pos)
 
 func _update_clouds(day_amount: float, dt: float) -> void:
 	if cloud_root == null or player == null:
 		return
-	var tile_size: float = 512.0
+	var tile_size: float = 560.0
 	var time_s: float = Time.get_ticks_msec() / 1000.0
 	var drift_x: float = time_s * cloud_scroll_speed
+	var drift_z: float = time_s * cloud_scroll_speed * 0.28
 	var snapped_x: float = floor((player.global_position.x - drift_x) / tile_size) * tile_size
-	var snapped_z: float = floor(player.global_position.z / tile_size) * tile_size
-	cloud_root.global_position = Vector3(snapped_x + drift_x, 108.0, snapped_z)
-	var target_alpha: float = 0.12 + day_amount * 0.42
+	var snapped_z: float = floor((player.global_position.z - drift_z) / tile_size) * tile_size
+	cloud_root.global_position = Vector3(snapped_x + drift_x, 118.0, snapped_z + drift_z)
 	var blend: float = 1.0 if dt <= 0.0 else clampf(dt * 1.4, 0.0, 1.0)
 	for i in range(cloud_sprites.size()):
-		var sprite: Sprite3D = cloud_sprites[i] as Sprite3D
-		if sprite == null:
+		var cluster: Node3D = cloud_sprites[i] as Node3D
+		if cluster == null:
 			continue
-		var base_pos: Vector3 = cloud_base_positions[i] if i < cloud_base_positions.size() else sprite.position
-		sprite.position = Vector3(base_pos.x, base_pos.y + sin(time_s * 0.08 + float(i) * 0.61) * 0.3, base_pos.z)
-		var target_color: Color = Color(1.0, 1.0, 1.0, target_alpha)
-		sprite.modulate = sprite.modulate.lerp(target_color, blend)
+		var base_pos: Vector3 = cloud_base_positions[i] if i < cloud_base_positions.size() else cluster.position
+		cluster.position = Vector3(base_pos.x, base_pos.y + sin(time_s * 0.08 + float(i) * 0.61) * 0.8, base_pos.z)
+		for child in cluster.get_children():
+			if child is MeshInstance3D:
+				var mesh_child: MeshInstance3D = child as MeshInstance3D
+				var mat: StandardMaterial3D = mesh_child.material_override as StandardMaterial3D
+				if mat != null:
+					var target_alpha: float = 0.32 + day_amount * 0.34 + (0.10 if current_weather in ["moderate_rain", "heavy_rain", "storm"] else 0.0)
+					mat.albedo_color = mat.albedo_color.lerp(Color(1.0, 1.0, 1.0, target_alpha), blend)
+
+func _setup_weather_visuals(scene: Node) -> void:
+	if weather_root != null:
+		weather_root.queue_free()
+	weather_root = Node3D.new()
+	weather_root.name = "WeatherRoot"
+	scene.add_child(weather_root)
+	rain_particles = GPUParticles3D.new()
+	rain_particles.amount = 1800
+	rain_particles.lifetime = 1.15
+	rain_particles.preprocess = 0.1
+	rain_particles.draw_order = GPUParticles3D.DRAW_ORDER_LIFETIME
+	rain_particles.visibility_aabb = AABB(Vector3(-28.0, -4.0, -28.0), Vector3(56.0, 32.0, 56.0))
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.03, 0.34)
+	rain_particles.draw_pass_1 = quad
+	var ppm := ParticleProcessMaterial.new()
+	ppm.direction = Vector3(0.0, -1.0, 0.0)
+	ppm.initial_velocity_min = 18.0
+	ppm.initial_velocity_max = 24.0
+	ppm.gravity = Vector3(0.0, -8.0, 0.0)
+	ppm.scale_min = 1.0
+	ppm.scale_max = 1.0
+	ppm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	ppm.emission_box_extents = Vector3(18.0, 10.0, 18.0)
+	rain_particles.process_material = ppm
+	var rain_mat := StandardMaterial3D.new()
+	rain_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	rain_mat.albedo_color = Color(0.72, 0.82, 0.94, 0.72)
+	rain_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	rain_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	rain_particles.material_override = rain_mat
+	rain_particles.emitting = false
+	weather_root.add_child(rain_particles)
+	_pick_next_weather(true)
+
+func _pick_next_weather(force_clear: bool = false) -> void:
+	weather_timer = 0.0
+	var rng := RandomNumberGenerator.new()
+	rng.seed = int(Time.get_ticks_msec()) + _day_count * 131
+	if force_clear:
+		current_weather = "clear"
+		weather_duration = 55.0
+		return
+	var roll: float = rng.randf()
+	if roll < 0.38:
+		current_weather = "clear"
+		weather_duration = rng.randf_range(55.0, 95.0)
+	elif roll < 0.56:
+		current_weather = "windy"
+		weather_duration = rng.randf_range(45.0, 80.0)
+	elif roll < 0.76:
+		current_weather = "light_rain"
+		weather_duration = rng.randf_range(40.0, 70.0)
+	elif roll < 0.90:
+		current_weather = "moderate_rain"
+		weather_duration = rng.randf_range(35.0, 60.0)
+	elif roll < 0.97:
+		current_weather = "heavy_rain"
+		weather_duration = rng.randf_range(30.0, 55.0)
+	else:
+		current_weather = "storm"
+		weather_duration = rng.randf_range(25.0, 45.0)
+
+func _apply_weather_to_player_hair() -> void:
+	if player == null or player.player_model == null:
+		return
+	if player.player_model.has_method("set_world_wind_direction"):
+		player.player_model.call("set_world_wind_direction", wind_direction * wind_strength)
+
+func _update_weather(dt: float) -> void:
+	if not is_session_active or weather_root == null or player == null:
+		return
+	weather_timer += dt
+	if weather_timer >= weather_duration:
+		_pick_next_weather(false)
+	var target_rain: float = 0.0
+	var target_wind: float = 0.18
+	match current_weather:
+		"windy":
+			target_wind = 0.60
+		"light_rain":
+			target_rain = 0.30
+			target_wind = 0.34
+		"moderate_rain":
+			target_rain = 0.60
+			target_wind = 0.45
+		"heavy_rain":
+			target_rain = 0.92
+			target_wind = 0.62
+		"storm":
+			target_rain = 1.0
+			target_wind = 0.78
+			if randf() < dt * 0.12:
+				lightning_flash = 1.0
+	wind_strength = lerpf(wind_strength, target_wind, clampf(dt * 0.8, 0.0, 1.0))
+	var time_s: float = Time.get_ticks_msec() / 1000.0
+	wind_direction = Vector3(cos(time_s * 0.08 + 0.6), 0.0, sin(time_s * 0.06 + 1.3)).normalized()
+	weather_root.global_position = Vector3(player.global_position.x, player.global_position.y + 13.0, player.global_position.z)
+	if rain_particles != null:
+		rain_particles.amount_ratio = target_rain
+		rain_particles.emitting = target_rain > 0.01
+		var ppm: ParticleProcessMaterial = rain_particles.process_material as ParticleProcessMaterial
+		if ppm != null:
+			ppm.direction = Vector3(-wind_direction.x * 0.26, -1.0, -wind_direction.z * 0.26).normalized()
+	_apply_weather_to_player_hair()
+	if lightning_flash > 0.0:
+		lightning_flash = maxf(0.0, lightning_flash - dt * 2.2)
+		if environment_resource != null:
+			environment_resource.ambient_light_energy += lightning_flash * 0.9
+		if sun_light != null:
+			sun_light.light_energy += lightning_flash * 0.5
 
 func _update_day_night(dt: float) -> void:
 	var total_cycle: float = day_duration_sec + night_duration_sec

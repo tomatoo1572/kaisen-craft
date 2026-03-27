@@ -1,0 +1,26 @@
+KaizenCraft v74
+
+This pass focuses on two groups of changes.
+
+PART 1 FIXES
+- Character creator rebuilt into a cleaner, smaller layout based on the provided screen direction.
+- Removed the older cluttered/example-style presentation.
+- Added a triangle body build / width control.
+- Height still uses metric + imperial display.
+- Width is now stored separately from height.
+- First-person camera logic moved closer to the actual head position.
+- Hair now anchors to the real head node and uses JJK-inspired voxel strand silhouettes.
+- Hair presets updated toward JJK-style profiles: buzz, Yuji, Megumi, Gojo, Yuta, long flow.
+- Inventory panel compacted so preview, equipment, crafting, and backpack fit into one cleaner screen.
+
+PART 2 WORLD / ENVIRONMENT
+- Terrain height logic updated for flatter plains plus stronger rolling hills.
+- Chunk loading budgets increased to reduce visible terrain holes.
+- Clouds changed from flat billboard patches to clustered 3D slab clouds.
+- Added a weather foundation with clear, windy, light rain, moderate rain, heavy rain, and storm states.
+- Hair sway now receives live wind direction from the weather system.
+
+KNOWN LIMITS OF THIS PASS
+- This is not yet a full one-to-one DBVHair editor clone with every strand-side numeric slider exposed.
+- The storm system includes rain and lightning flash behavior, but not full thunder audio.
+- This pass targets the biggest layout, head-attachment, first-person, weather, and terrain issues first.

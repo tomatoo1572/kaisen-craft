@@ -1,0 +1,12 @@
+KaizenCraft v74 hotfix 3
+
+This pass only adjusts the camera/body alignment issues reported after v74 hotfix 2.
+
+Changes:
+- raised first-person eye placement closer to the actual head/eye line
+- removed width-scale influence from first-person camera placement
+- pushed the first-person body model slightly down/back so the player does not look through the chest
+- stabilized fallback first-person camera offsets
+- tightened camera near clip for the body-visible view
+
+This does not claim to finish the larger UI and hair-editor requests yet.

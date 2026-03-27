@@ -1,0 +1,19 @@
+Place the contents of the official GodotVoxelExtension.zip release here.
+
+Recommended release:
+- Zylann Voxel Tools 1.6 GDExtension for Godot 4.5+
+- Release asset filename: GodotVoxelExtension.zip
+
+How to install into this project:
+1. Download GodotVoxelExtension.zip from the official Zylann/godot_voxel releases page.
+2. Open the zip.
+3. Extract its contents at the ROOT of this project, not inside another nested folder.
+4. After extraction, this project should contain:
+   addons/zylann.voxel/voxel.gdextension
+   addons/zylann.voxel/plugin.cfg
+   addons/zylann.voxel/bin/...
+5. Open the project in official Godot 4.6.
+
+Important:
+- Do not use a custom Godot build that already includes the voxel module when using the GDExtension package.
+- The plugin is structured like a project plugin and is meant to be unzipped at the project root.

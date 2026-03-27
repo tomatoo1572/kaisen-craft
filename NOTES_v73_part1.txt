@@ -1,0 +1,43 @@
+KAISENCRAFT REVAMP v73_PART1
+===========================
+
+This pass intentionally focuses on the character pipeline and inventory cleanup first.
+
+Included:
+- actual layered body texture compositor on the 3D player model
+  - skin base
+  - boxers
+  - male1/male2/male3/male4 overlay
+- actual 3D hair rendered on the player model
+- hair styles:
+  - none
+  - buzz_01
+  - short_01
+  - messy_01
+  - spiky_01
+  - long_01
+- hair color support
+- simple strand sway / wind-ready movement foundation
+- character menu rebuilt around the provided newscreen + logo
+- body and hair are split into separate tabs instead of showing everything at once
+- height slider now shows metric + imperial
+- inventory panel cleaned up so the screen fits better
+- inventory now has:
+  - player preview
+  - equipment column (visual layout foundation)
+  - crafting
+  - backpack
+- first-person body visibility changed so arms remain visible instead of disappearing
+
+Not finished in this pass:
+- equipment slot backend logic
+- weather system
+- terrain / biome overhaul
+- skybox / shader overhaul
+- block rendering / culling deep fix
+- full optimization sweep
+
+Recommended next pass:
+1. world rendering / culling / terrain / sky / clouds
+2. weather + wind manager feeding hair sway
+3. optimization / cleanup / remove unused assets

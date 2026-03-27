@@ -1,0 +1,58 @@
+KAIZENCRAFT REVAMP V75
+
+INCLUDED IN THIS PASS
+- Keeps the v74 part-two world systems foundation (weather, wind, slab clouds, terrain shaping pass).
+- Replaces the simple preset-only hair with a modular strand editor system.
+- Keeps the newer first-person camera/body alignment fixes carried forward.
+
+RECOMMENDED ARCHITECTURE
+- player/CharacterAppearance.gd
+  Stores the player's appearance values in one expandable data object.
+- player/PlayerModel.gd
+  Loads the player model, applies body textures, rebuilds live modular hair, and updates wind motion.
+- player/HairStyleLibrary.gd
+  Defines the hairstyle data shape, strand sanitizing, preset generation, and preset display names.
+- player/HairCodec.gd
+  Handles save/load/export/import for hairstyle data.
+- ui/HairEditorPanel.gd
+  Builds the in-game strand editor UI and emits live updates.
+- ui/Hud.gd
+  Hosts the character creator, preview viewport, inventory, and hooks hair/body changes into the real player.
+
+HAIR DATA MODEL
+- Dictionary root:
+  version
+  preset_id
+  sides
+- sides contains:
+  front, top, back, left, right
+- each side stores an array of strand dictionaries
+- each strand stores:
+  enabled
+  width
+  length
+  depth
+  bend
+  offset [x, y, z]
+  rotation [x, y, z]
+  taper
+  sway
+
+LIVE PREVIEW FLOW
+- The character creator hair panel edits the currently selected strand.
+- The panel emits hair_data_changed and hair_color_changed.
+- Hud.gd applies those values to the player's CharacterAppearance.
+- Player.gd forwards the updated appearance to PlayerModel.gd.
+- PlayerModel.gd rebuilds the modular hair on the actual head node and updates the preview model too.
+
+SAVE / LOAD / EXPORT
+- Saved presets are written to user://hair_presets/
+- Export Hair Code uses base64 JSON of the normalized hair data.
+- Import Hair Code decodes the text and reapplies all strand settings.
+
+EXPANSION POINTS
+- Add more presets in player/HairStyleLibrary.gd
+- Add more strand slots directly in the editor UI or by presets/imported data
+- Add textures/material variations by extending PlayerModel.gd strand material logic
+- Add male/female-specific presets later by storing category tags in the hair data or preset metadata
+- Add facial/clothing systems beside this without changing the hair data format
